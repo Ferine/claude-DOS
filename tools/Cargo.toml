@@ -1,0 +1,9 @@
+[package]
+name = "claudedos-tools"
+version = "0.1.0"
+edition = "2021"
+description = "Host-side tools for claudeDOS: FAT12/16 disk image builder"
+
+[[bin]]
+name = "mkfloppy"
+path = "src/main.rs"

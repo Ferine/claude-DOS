@@ -1,0 +1,7 @@
+[package]
+name = "claudedos-tests"
+version = "0.1.0"
+edition = "2021"
+description = "Integration tests for claudeDOS using QEMU"
+
+[dependencies]

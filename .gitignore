@@ -1,0 +1,7 @@
+images/
+tools/target/
+tests/target/
+*.img
+*.bin
+*.o
+.DS_Store
