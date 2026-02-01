@@ -76,6 +76,7 @@ search_drive        db  0           ; Drive for current search
 search_name         times 11 db 0   ; FCB-format search name
 search_dir_sector   dw  0           ; Current directory sector being searched
 search_dir_index    dw  0           ; Current entry index in search
+search_dir_cluster  dw  0           ; Directory cluster being searched (0=root)
 
 ; ---------------------------------------------------------------------------
 ; Path parsing workspace
@@ -84,10 +85,25 @@ path_buffer         times 128 db 0  ; Temporary path buffer
 fcb_name_buffer     times 11 db 0   ; Temporary FCB name
 
 ; ---------------------------------------------------------------------------
+; Current directory state
+; ---------------------------------------------------------------------------
+current_dir_cluster dw  0           ; 0 = root directory
+current_dir_path    times 64 db 0   ; Current directory path string (ASCIIZ)
+
+; ---------------------------------------------------------------------------
 ; Disk geometry for LBA-to-CHS conversion (used as memory operand for DIV)
 ; ---------------------------------------------------------------------------
 fat_spt             dw  18          ; Sectors per track (1.44MB floppy)
 fat_heads           dw  2           ; Number of heads
+
+; ---------------------------------------------------------------------------
+; XMS (Extended Memory Specification) State
+; ---------------------------------------------------------------------------
+xms_installed       db  1           ; XMS available (always 1 for claudeDOS)
+xms_total_kb        dw  16384       ; Total extended memory (16MB)
+xms_free_kb         dw  16384       ; Free extended memory in KB
+xms_handles:                        ; XMS handle table (16 handles)
+    times XMS_MAX_HANDLES * XMS_HANDLE_SIZE db 0
 
 ; ---------------------------------------------------------------------------
 ; EXEC workspace (saved parent state)

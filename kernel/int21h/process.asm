@@ -111,11 +111,9 @@ int21_4B:
     jmp     .do_alloc
 
 .exe_size:
-    ; .EXE: Need to read MZ header to get min_alloc
-    ; First sector is already in disk_buffer from fat_find_in_root
-    ; But we may have clobbered it. Re-read first sector of EXE.
-    push    ax
-    push    dx
+    ; .EXE: Need to read MZ header to get memory requirements
+    ; The load size comes from the MZ header (page count), NOT file size!
+    ; This is important for EXEs with overlays or DOS extender code.
 
     ; Read first sector of EXE file to get header
     push    es
@@ -130,42 +128,57 @@ int21_4B:
     call    fat_cluster_to_lba
     call    fat_read_sector
     pop     es
-    jc      .exe_size_error_pop
+    jc      .exe_size_error_nostack
 
     ; Verify MZ signature
     cmp     word [disk_buffer], 0x5A4D
-    jne     .exe_size_error_pop
-
-    ; Calculate load size: pages * 512 - header_paras * 16
-    ; load_size = (e_cp - 1) * 512 + e_cblp - e_cparhdr * 16
-    ; But simpler: load_paras = (file_size - header_bytes) / 16
-    ; file_size is in DX:AX (popped below)
+    jne     .exe_size_error_nostack
 
     ; Read header fields
-    mov     cx, [disk_buffer + 0x08]    ; Header paragraphs (e_cparhdr)
-    mov     bx, [disk_buffer + 0x0A]    ; Min extra paragraphs (e_minalloc)
+    mov     ax, [disk_buffer + 0x02]    ; e_cblp: bytes on last page
+    mov     [.exe_last_page], ax
+    mov     ax, [disk_buffer + 0x04]    ; e_cp: page count (512-byte pages)
+    mov     [.exe_page_count], ax
+    mov     cx, [disk_buffer + 0x08]    ; e_cparhdr: header paragraphs
+    mov     bx, [disk_buffer + 0x0A]    ; e_minalloc: min extra paragraphs
     mov     [exec_min_alloc], bx
-    mov     bx, [disk_buffer + 0x0C]    ; Max extra paragraphs (e_maxalloc)
+    mov     bx, [disk_buffer + 0x0C]    ; e_maxalloc: max extra paragraphs
     mov     [exec_max_alloc], bx
 
-    pop     dx
-    pop     ax
+    ; Calculate load size from MZ header (not file size!)
+    ; if e_cblp == 0: load_size = e_cp * 512
+    ; else: load_size = (e_cp - 1) * 512 + e_cblp
+    mov     ax, [.exe_page_count]
+    cmp     word [.exe_last_page], 0
+    je      .full_pages
+    dec     ax                          ; (e_cp - 1)
+.full_pages:
+    ; AX = number of full 512-byte pages
+    ; Multiply by 512: shift left 9 bits (AX * 512 -> DX:AX)
+    xor     dx, dx
+    mov     cl, 9
+    shl     ax, cl                      ; AX = (pages * 512) low word
+    ; For our purposes, DX stays 0 (load < 64KB for this calculation)
 
-    ; AX:DX = file size
-    ; Calculate load_paras = (file_size + 15) / 16 - header_paras
+    ; Add last page bytes if non-zero
+    cmp     word [.exe_last_page], 0
+    je      .no_last_page
+    add     ax, [.exe_last_page]
+.no_last_page:
+    ; AX = total load image size in bytes
+
+    ; Subtract header size (header_paras * 16)
+    push    cx
+    mov     cx, [disk_buffer + 0x08]    ; Header paragraphs
+    shl     cx, 4                       ; * 16 = header bytes
+    sub     ax, cx
+    pop     cx
+    ; AX = load module size in bytes (excluding header)
+
+    ; Convert to paragraphs: (size + 15) / 16
     add     ax, 15
-    adc     dx, 0
-    ; Divide by 16
-    shr     dx, 1
-    rcr     ax, 1
-    shr     dx, 1
-    rcr     ax, 1
-    shr     dx, 1
-    rcr     ax, 1
-    shr     dx, 1
-    rcr     ax, 1                   ; AX = total file paragraphs
-    sub     ax, cx                  ; Subtract header paragraphs = load paragraphs
-    mov     [exec_load_paras], ax   ; Save load paragraphs
+    shr     ax, 4                       ; AX = load paragraphs
+    mov     [exec_load_paras], ax
 
     ; DOS behavior: allocate MAX_ALLOC if possible, else largest available
     ; Total memory = PSP (16) + load_paras + max_alloc
@@ -186,11 +199,13 @@ int21_4B:
 
 .exe_size_error:
     pop     es
-.exe_size_error_pop:
-    pop     dx
-    pop     ax
+.exe_size_error_nostack:
     mov     ax, ERR_READ_FAULT
     jmp     dos_set_error
+
+; Local variables for EXE size calculation
+.exe_page_count dw  0
+.exe_last_page  dw  0
 
 .do_alloc:
     ; IMPORTANT: Allocate environment FIRST, then child memory
@@ -233,48 +248,6 @@ int21_4B:
     ; =========== STEP 2: Allocate environment block FIRST ===========
     ; This ensures it's at a lower segment than the child
 
-    ; DEBUG: print source env segment and first 8 bytes
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_src_env_debug
-    push    ax
-    push    bx
-    push    cx
-    push    es
-    push    si
-
-    ; Print 'S' and source segment
-    mov     al, 'S'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    mov     ax, [cs:.src_env_seg]
-    call    .print_hex_ax
-    mov     al, ':'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-
-    ; Print first 8 bytes of source env
-    mov     es, [cs:.src_env_seg]
-    xor     si, si
-    mov     cx, 8
-.print_src_env:
-    mov     al, [es:si]
-    call    .print_hex_al
-    inc     si
-    loop    .print_src_env
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-
-    pop     si
-    pop     es
-    pop     cx
-    pop     bx
-    pop     ax
-.skip_src_env_debug:
-
     mov     si, bx                  ; SI = source environment segment
     push    cs
     pop     es
@@ -283,64 +256,10 @@ int21_4B:
     jc      .env_alloc_fail_early
 
     ; AX = new environment segment
-    ; DEBUG: verify data right after env_create_with_path returns
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_post_env_debug
-    push    ax
-    push    bx
-    push    es
-    ; Print '@' then segment:firstbyte
-    push    ax                  ; Save AX (env segment)
-    mov     al, '@'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     ax                  ; Restore env segment
-    push    ax                  ; Save it again
-    call    .print_hex_ax       ; Print segment
-    mov     al, ':'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     ax                  ; AX = env segment
-    mov     es, ax
-    mov     al, [es:0]          ; Read first byte
-    call    .print_hex_al
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     es
-    pop     bx
-    pop     ax
-.skip_post_env_debug:
-
     mov     [exec_child_env], ax
 
     ; =========== STEP 3: Allocate child memory ===========
     mov     bx, [cs:.child_size_req]
-
-    ; DEBUG: verify env data right before child allocation
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_pre_alloc_debug
-    push    ax
-    push    bx
-    push    es
-    mov     al, '#'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    mov     es, [cs:exec_child_env]
-    mov     al, [es:0]
-    call    .print_hex_al
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     es
-    pop     bx
-    pop     ax
-.skip_pre_alloc_debug:
 
     ; DEBUG: print requested allocation size
     cmp     byte [cs:debug_trace], 0
@@ -367,31 +286,33 @@ int21_4B:
     call    mcb_alloc
     jc      .exec_no_mem_free_env
 
+    ; DEBUG: print returned segment
+    cmp     byte [cs:debug_trace], 0
+    je      .skip_ret_seg_debug
+    push    ax
+    push    bx
+    mov     bx, ax              ; Save returned segment
+    mov     al, '*'
+    mov     ah, 0x0E
+    push    bx
+    xor     bx, bx
+    int     0x10
+    pop     ax                  ; AX = returned segment
+    call    .print_hex_ax
+    mov     al, ' '
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    pop     bx
+    pop     ax
+.skip_ret_seg_debug:
+
     ; AX = child segment (after MCB)
     mov     [exec_child_seg], ax
 
     ; =========== STEP 4: Build PSP ===========
     push    es
     mov     es, ax                  ; ES = child PSP segment
-
-    ; DEBUG: print returned env segment
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_ret_env_debug
-    push    ax
-    push    bx
-    mov     al, 'R'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     bx
-    mov     ax, [exec_child_env]
-    call    .print_hex_ax
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     ax
-.skip_ret_env_debug:
 
     ; Fix environment MCB ownership: set owner to child PSP
     push    es
@@ -404,28 +325,10 @@ int21_4B:
     pop     ax
     pop     es
 
-    ; DEBUG: print ES (should be child PSP, not env) before build_psp
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_es_debug
-    push    ax
-    push    bx
-    mov     al, 'B'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    mov     ax, es
-    call    .print_hex_ax
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     bx
-    pop     ax
-.skip_es_debug:
-
     ; Build PSP with new environment
     ; ES = child PSP segment
     ; DS:SI = command tail
+
     push    ds
     mov     ds, [cs:.tmp_tail_seg]
     mov     si, [cs:.tmp_tail_off]
@@ -435,130 +338,17 @@ int21_4B:
     call    build_psp
     pop     ds                      ; DS = kernel
 
-    ; DEBUG: verify env data right after build_psp
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_post_psp_debug
-    push    ax
-    push    bx
-    push    es
-    mov     al, '%'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    mov     es, [cs:exec_child_env]
-    mov     al, [es:0]
-    call    .print_hex_al
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     es
-    pop     bx
-    pop     ax
-.skip_post_psp_debug:
-
-    ; DEBUG: print PSP:2Ch after build_psp
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_psp2c_debug
-    push    ax
-    push    bx
-    mov     al, 'P'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    ; Read PSP:2Ch
-    mov     ax, [es:0x2C]
-    call    .print_hex_ax
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     bx
-    pop     ax
-.skip_psp2c_debug:
-
     ; Set PSP memory top (offset 0x02) to end of allocated block
     ; MCB is at (exec_child_seg - 1), size is at MCB offset 3
+
     push    ds
-    mov     ax, [exec_child_seg]
+    mov     ax, [cs:exec_child_seg]
     dec     ax                      ; AX = MCB segment
     mov     ds, ax
-    mov     ax, [ds:3]              ; AX = block size in paragraphs
+    mov     ax, [ds:3]              ; MCB size
     pop     ds
-    add     ax, [exec_child_seg]    ; AX = end of block (segment after last paragraph)
+    add     ax, [cs:exec_child_seg] ; AX = end of block (segment after last paragraph)
     mov     [es:0x02], ax           ; Set PSP memory top
-
-    ; DEBUG: print command tail from PSP
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_tail_debug
-    push    ax
-    push    bx
-    push    cx
-    push    si
-    ; Print "TAIL:"
-    mov     al, 'T'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    mov     al, 'A'
-    int     0x10
-    mov     al, 'I'
-    int     0x10
-    mov     al, 'L'
-    int     0x10
-    mov     al, ':'
-    int     0x10
-    ; ES still = child PSP segment
-    ; Print length byte
-    mov     al, [es:0x80]
-    call    .print_hex_al
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    ; Print first 10 chars of tail
-    mov     si, 0x81
-    mov     cx, 10
-.tail_print_loop:
-    mov     al, [es:si]
-    call    .print_hex_al
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    inc     si
-    loop    .tail_print_loop
-    mov     al, 0x0D
-    int     0x10
-    mov     al, 0x0A
-    int     0x10
-    pop     si
-    pop     cx
-    pop     bx
-    pop     ax
-.skip_tail_debug:
-
-    ; DEBUG: verify env after memory top
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_memtop_debug
-    push    ax
-    push    bx
-    push    es
-    mov     al, 'T'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    mov     es, [cs:exec_child_env]
-    mov     al, [es:0]
-    call    .print_hex_al
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     es
-    pop     bx
-    pop     ax
-.skip_memtop_debug:
 
     ; Save parent's INT 22h/23h/24h vectors into child PSP
     push    es
@@ -587,28 +377,6 @@ int21_4B:
     push    cs
     pop     ds                      ; DS = kernel again
 
-    ; DEBUG: verify env after vectors
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_vec_debug
-    push    ax
-    push    bx
-    push    es
-    mov     al, 'V'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    mov     es, [cs:exec_child_env]
-    mov     al, [es:0]
-    call    .print_hex_al
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     es
-    pop     bx
-    pop     ax
-.skip_vec_debug:
-
     ; Load program
     mov     si, exec_fcb_name
 
@@ -620,68 +388,9 @@ int21_4B:
     call    load_com
     jc      .exec_load_fail
 
-    ; DEBUG: Print first bytes at PSP:0100 to verify COM load
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_com_verify
-    push    ax
-    push    bx
-    push    es
-    ; Print "COM:"
-    mov     al, 'L'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    mov     al, 'D'
-    int     0x10
-    mov     al, ':'
-    int     0x10
-    ; Load ES = child segment
-    mov     es, [cs:exec_child_seg]
-    ; Print first 8 bytes at ES:0100
-    mov     si, 0x0100
-    mov     cx, 8
-.com_print_loop:
-    mov     al, [es:si]
-    call    .print_hex_al
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    inc     si
-    loop    .com_print_loop
-    mov     al, 0x0D
-    int     0x10
-    mov     al, 0x0A
-    int     0x10
-    pop     es
-    pop     bx
-    pop     ax
-.skip_com_verify:
-
     ; Set current_psp to child
     mov     ax, [exec_child_seg]
     mov     [current_psp], ax
-
-    ; DEBUG: Print segment we're about to jump to
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_jump_debug
-    push    ax
-    push    bx
-    mov     al, 'J'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    mov     al, ':'
-    int     0x10
-    mov     ax, [cs:exec_child_seg]
-    call    .print_hex_ax
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     bx
-    pop     ax
-.skip_jump_debug:
 
     ; Transfer control to .COM program
     ; CLI, set SS:SP, push return address, STI, set segments, far jump
@@ -721,119 +430,6 @@ int21_4B:
 
 .load_exe_prog:
     ; --- Load .EXE ---
-    ; Debug: print child env before EXE load
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_env_debug
-    push    ax
-    push    bx
-    push    cx
-    push    si
-    push    di
-    push    es
-
-    ; Print "ENV:"
-    mov     al, 'E'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    mov     al, 'N'
-    int     0x10
-    mov     al, 'V'
-    int     0x10
-    mov     al, ':'
-    int     0x10
-
-    ; Get child environment segment from child PSP
-    mov     es, [exec_child_seg]
-    mov     ax, [es:0x2C]           ; Environment segment
-    push    ax                      ; Save env segment
-
-    ; Print env segment
-    call    .print_hex_ax
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-
-    ; Print first 16 bytes of environment
-    pop     ax                      ; Restore env segment
-    mov     es, ax
-    xor     si, si
-    mov     cx, 16
-.print_env_bytes:
-    mov     al, [es:si]
-    call    .print_hex_al
-    mov     al, ' '
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    inc     si
-    loop    .print_env_bytes
-
-    mov     al, 0x0D
-    int     0x10
-    mov     al, 0x0A
-    int     0x10
-
-    pop     es
-    pop     di
-    pop     si
-    pop     cx
-    pop     bx
-    pop     ax
-    jmp     .skip_env_debug
-
-.print_hex_ax:
-    push    ax
-    push    cx
-    mov     cx, 4
-.pha_loop:
-    rol     ax, 4
-    push    ax
-    and     al, 0x0F
-    add     al, '0'
-    cmp     al, '9'
-    jbe     .pha_p
-    add     al, 7
-.pha_p:
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     ax
-    loop    .pha_loop
-    pop     cx
-    pop     ax
-    ret
-
-.print_hex_al:
-    push    ax
-    push    bx
-    mov     ah, al
-    shr     al, 4
-    add     al, '0'
-    cmp     al, '9'
-    jbe     .phal1
-    add     al, 7
-.phal1:
-    mov     bx, 0
-    push    ax
-    mov     ah, 0x0E
-    int     0x10
-    pop     ax
-    mov     al, ah
-    and     al, 0x0F
-    add     al, '0'
-    cmp     al, '9'
-    jbe     .phal2
-    add     al, 7
-.phal2:
-    mov     ah, 0x0E
-    int     0x10
-    pop     bx
-    pop     ax
-    ret
-
-.skip_env_debug:
     mov     ax, [exec_child_seg]
     add     ax, 0x10                ; Load segment = PSP + 10h (256 bytes)
     call    load_exe
@@ -1017,6 +613,31 @@ int21_4B:
 .tmp_tail_off   dw  0
 .child_size_req dw  0
 .src_env_seg    dw  0
+
+; Debug helper: print AX as 4-digit hex
+.print_hex_ax:
+    push    ax
+    push    bx
+    push    cx
+    mov     cx, 4
+.pha_loop:
+    rol     ax, 4
+    push    ax
+    and     al, 0x0F
+    add     al, '0'
+    cmp     al, '9'
+    jbe     .pha_print
+    add     al, 7
+.pha_print:
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    pop     ax
+    loop    .pha_loop
+    pop     cx
+    pop     bx
+    pop     ax
+    ret
 
 ; AH=4Ch - Terminate with Return Code
 ; Input: AL = return code

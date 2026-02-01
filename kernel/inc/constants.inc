@@ -153,3 +153,7 @@ STDOUT              equ     1
 STDERR              equ     2
 STDAUX              equ     3
 STDPRN              equ     4
+
+; XMS (Extended Memory Specification) constants
+XMS_MAX_HANDLES     equ     16          ; Maximum XMS handles
+XMS_HANDLE_SIZE     equ     6           ; Size per handle (2 size + 4 address)

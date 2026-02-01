@@ -210,13 +210,19 @@ int21_3C:
 .cr_copied:
     pop     ds                      ; DS = kernel seg
 
-    ; Convert ASCIIZ to FCB name
+    ; Resolve path to get directory cluster and filename
     mov     si, path_buffer
-    call    fat_name_to_fcb
+    call    resolve_path
+    jc      .cr_path_not_found
+
+    ; AX = directory cluster, fcb_name_buffer = filename
+    ; For now, only allow creating in root directory
+    test    ax, ax
+    jnz     .cr_subdir_denied
 
     ; Check if file already exists
     mov     si, fcb_name_buffer
-    call    fat_find_in_root
+    call    fat_find_in_directory
     jnc     .cr_truncate            ; File exists - truncate it
 
     ; File doesn't exist - create new directory entry
@@ -436,6 +442,27 @@ int21_3C:
     mov     ax, ERR_CANNOT_MAKE
     jmp     dos_set_error
 
+.cr_path_not_found:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_PATH_NOT_FOUND
+    jmp     dos_set_error
+
+.cr_subdir_denied:
+    ; Creating files in subdirectories not yet supported
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_ACCESS_DENIED
+    jmp     dos_set_error
+
 ; AH=3Dh - Open file
 ; Input: DS:DX = ASCIIZ filename (caller's), AL = access mode
 int21_3D:
@@ -486,13 +513,17 @@ int21_3D:
     pop     si
 .skip_fname_trace:
 
-    ; Convert ASCIIZ to FCB name
+    ; Resolve path to get directory cluster and filename
     mov     si, path_buffer
-    call    fat_name_to_fcb
+    call    resolve_path
+    jc      .open_not_found
 
-    ; Search root directory
+    ; AX = directory cluster, fcb_name_buffer = filename
+    ; Search directory for the file
+    push    ax                      ; Save dir cluster for later
     mov     si, fcb_name_buffer
-    call    fat_find_in_root
+    call    fat_find_in_directory
+    pop     cx                      ; CX = dir cluster (for reference)
     jc      .open_not_found
 
     ; DI = pointer to dir entry in disk_buffer, AX = sector number
@@ -1266,13 +1297,19 @@ int21_41:
 .del_copied:
     pop     ds                      ; DS = kernel seg
 
-    ; Convert ASCIIZ to FCB name
+    ; Resolve path to get directory cluster and filename
     mov     si, path_buffer
-    call    fat_name_to_fcb
+    call    resolve_path
+    jc      .del_not_found
 
-    ; Find file in root directory
+    ; AX = directory cluster, fcb_name_buffer = filename
+    ; For now, only allow deleting from root directory
+    test    ax, ax
+    jnz     .del_access_denied
+
+    ; Find file in directory
     mov     si, fcb_name_buffer
-    call    fat_find_in_root
+    call    fat_find_in_directory
     jc      .del_not_found
 
     ; DI = dir entry in disk_buffer, AX = sector number
@@ -1490,13 +1527,18 @@ int21_43:
 .attr_copied:
     pop     ds                      ; DS = kernel seg
 
-    ; Convert ASCIIZ to FCB name
+    ; Resolve path to get directory cluster and filename
     mov     si, path_buffer
-    call    fat_name_to_fcb
+    call    resolve_path
+    jc      .attr_not_found
 
-    ; Find file in root directory
+    ; AX = directory cluster, fcb_name_buffer = filename
+    push    ax                      ; Save directory cluster
+
+    ; Find file in directory
     mov     si, fcb_name_buffer
-    call    fat_find_in_root
+    call    fat_find_in_directory
+    pop     cx                      ; Pop directory cluster (not needed anymore)
     jc      .attr_not_found
 
     ; DI = dir entry in disk_buffer, AX = sector number

@@ -25,6 +25,18 @@ kernel_init:
     ; Install INT 33h (mouse driver stub)
     call    install_int33
 
+    ; Install INT 2Fh (multiplex interrupt for XMS)
+    call    install_int2f
+
+    ; Install INT 15h (extended memory services)
+    call    install_int15
+
+    ; Install INT 31h (DPMI stub for debugging)
+    call    install_int31
+
+    ; Install INT 67h (EMS/VCPI stub)
+    call    install_int67
+
     ; Install default CPU exception handlers (for debugging)
     call    install_exception_handlers
 
@@ -37,8 +49,8 @@ kernel_init:
     mov     si, msg_init_done
     call    bios_print_string
 
-    ; Disable INT 21h debug tracing for clean output
-    mov     byte [debug_trace], 0
+    ; Enable INT 21h debug tracing for debugging
+    mov     byte [debug_trace], 1
 
     ret
 
@@ -107,6 +119,86 @@ install_int33:
     ret
 
 ; ---------------------------------------------------------------------------
+; install_int2f - Install INT 2Fh (multiplex interrupt for XMS detection)
+; ---------------------------------------------------------------------------
+install_int2f:
+    push    es
+    push    ax
+
+    xor     ax, ax
+    mov     es, ax
+
+    ; INT 2Fh vector at 0000:00BC (2Fh * 4 = 0xBC)
+    mov     word [es:0x00BC], int2f_handler
+    mov     [es:0x00BE], cs
+
+    pop     ax
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; install_int15 - Install INT 15h (extended memory services)
+; ---------------------------------------------------------------------------
+install_int15:
+    push    es
+    push    ax
+    push    bx
+
+    xor     ax, ax
+    mov     es, ax
+
+    ; Save old INT 15h vector (at 0000:0054 = 15h * 4)
+    mov     ax, [es:0x0054]
+    mov     [int15_old_vector], ax
+    mov     ax, [es:0x0056]
+    mov     [int15_old_vector + 2], ax
+
+    ; Install our handler
+    mov     word [es:0x0054], int15_handler
+    mov     [es:0x0056], cs
+
+    pop     bx
+    pop     ax
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; install_int31 - Install INT 31h (DPMI stub)
+; ---------------------------------------------------------------------------
+install_int31:
+    push    es
+    push    ax
+
+    xor     ax, ax
+    mov     es, ax
+
+    ; INT 31h vector at 0000:00C4 (31h * 4)
+    mov     word [es:0x00C4], int31_handler
+    mov     [es:0x00C6], cs
+
+    pop     ax
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; install_int67 - Install INT 67h (EMS/VCPI stub)
+; ---------------------------------------------------------------------------
+install_int67:
+    push    es
+    push    ax
+
+    xor     ax, ax
+    mov     es, ax
+
+    ; INT 67h vector at 0000:019C (67h * 4)
+    mov     word [es:0x019C], int67_handler
+    mov     [es:0x019E], cs
+
+    pop     ax
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
 ; install_exception_handlers - Install default CPU exception handlers
 ; ---------------------------------------------------------------------------
 install_exception_handlers:
@@ -132,19 +224,20 @@ install_exception_handlers:
     mov     word [es:0x0018], int06_handler
     mov     [es:0x001A], cs
 
+    ; INT 0Dh vector at 0000:0034 (general protection fault)
+    mov     word [es:0x0034], int0d_handler
+    mov     [es:0x0036], cs
+
     pop     ax
     pop     es
     ret
 
 ; ---------------------------------------------------------------------------
-; INT 00h handler - Divide Error (default handler for debugging)
+; INT 00h handler - Divide Error (always prints for debugging)
 ; ---------------------------------------------------------------------------
 int00_handler:
-    ; Debug trace if enabled
     push    ax
     push    bx
-    cmp     byte [cs:debug_trace], 0
-    je      .int00_no_trace
     mov     al, '#'
     mov     ah, 0x0E
     xor     bx, bx
@@ -155,7 +248,6 @@ int00_handler:
     int     0x10
     mov     al, '#'
     int     0x10
-.int00_no_trace:
     pop     bx
     pop     ax
     ; Default behavior: just IRET (program will re-execute faulting instruction)
@@ -163,13 +255,11 @@ int00_handler:
     iret
 
 ; ---------------------------------------------------------------------------
-; INT 04h handler - Overflow (INTO instruction)
+; INT 04h handler - Overflow (INTO instruction) - always prints
 ; ---------------------------------------------------------------------------
 int04_handler:
     push    ax
     push    bx
-    cmp     byte [cs:debug_trace], 0
-    je      .int04_no_trace
     mov     al, '#'
     mov     ah, 0x0E
     xor     bx, bx
@@ -180,19 +270,16 @@ int04_handler:
     int     0x10
     mov     al, '#'
     int     0x10
-.int04_no_trace:
     pop     bx
     pop     ax
     iret
 
 ; ---------------------------------------------------------------------------
-; INT 05h handler - Bound Range Exceeded
+; INT 05h handler - Bound Range Exceeded - always prints
 ; ---------------------------------------------------------------------------
 int05_handler:
     push    ax
     push    bx
-    cmp     byte [cs:debug_trace], 0
-    je      .int05_no_trace
     mov     al, '#'
     mov     ah, 0x0E
     xor     bx, bx
@@ -203,19 +290,16 @@ int05_handler:
     int     0x10
     mov     al, '#'
     int     0x10
-.int05_no_trace:
     pop     bx
     pop     ax
     iret
 
 ; ---------------------------------------------------------------------------
-; INT 06h handler - Invalid Opcode
+; INT 06h handler - Invalid Opcode - always prints
 ; ---------------------------------------------------------------------------
 int06_handler:
     push    ax
     push    bx
-    cmp     byte [cs:debug_trace], 0
-    je      .int06_no_trace
     mov     al, '#'
     mov     ah, 0x0E
     xor     bx, bx
@@ -226,7 +310,26 @@ int06_handler:
     int     0x10
     mov     al, '#'
     int     0x10
-.int06_no_trace:
+    pop     bx
+    pop     ax
+    iret
+
+; ---------------------------------------------------------------------------
+; INT 0Dh handler - General Protection Fault - always prints
+; ---------------------------------------------------------------------------
+int0d_handler:
+    push    ax
+    push    bx
+    mov     al, '#'
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    mov     al, '0'
+    int     0x10
+    mov     al, 'D'
+    int     0x10
+    mov     al, '#'
+    int     0x10
     pop     bx
     pop     ax
     iret

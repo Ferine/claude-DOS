@@ -71,7 +71,15 @@ mcb_alloc:
 .scan_loop:
     mov     es, ax
 
+    ; Verify valid MCB signature
+    cmp     byte [es:0], 'M'
+    je      .sig_ok
+    cmp     byte [es:0], 'Z'
+    je      .sig_ok
+    ; Invalid MCB chain - bail out
+    jmp     .no_memory
 
+.sig_ok:
     ; Check if block is free
     cmp     word [es:1], 0
     jne     .next_block
@@ -80,12 +88,12 @@ mcb_alloc:
     mov     cx, [es:3]
     cmp     cx, bx
     jae     .found_block
-    
+
     ; Track largest
     cmp     cx, dx
     jbe     .next_block
     mov     dx, cx
-    
+
 .next_block:
     cmp     byte [es:0], 'Z'   ; Last block?
     je      .no_memory
@@ -127,7 +135,63 @@ mcb_alloc:
 
     ; Update original block (the one we're allocating)
     mov     byte [es:0], 'M'    ; Not last anymore
-    mov     [es:3], bx          ; Exact size requested
+    mov     [es:3], bx          ; Exact size requested - MUST do before debug code!
+
+    ; Debug: print MCB segment and size being written
+    push    ax
+    push    bx
+    push    cx
+    push    es                  ; Save ES - int 0x10 may corrupt it
+    mov     dx, es              ; Save ES in DX for printing
+    mov     al, '^'
+    mov     ah, 0x0E
+    push    bx
+    mov     bx, 0x0007
+    int     0x10
+    ; Print ES (MCB segment we're writing to)
+    mov     ax, dx              ; Get saved ES from DX
+    mov     cx, 4
+.dbg_mcb_seg:
+    rol     ax, 4
+    push    ax
+    and     al, 0x0F
+    add     al, '0'
+    cmp     al, '9'
+    jbe     .dbg_ms_ok
+    add     al, 7
+.dbg_ms_ok:
+    mov     ah, 0x0E
+    mov     bx, 0x0007
+    int     0x10
+    pop     ax
+    loop    .dbg_mcb_seg
+    mov     al, ':'
+    mov     ah, 0x0E
+    int     0x10
+    pop     bx
+    ; Print BX (size to write)
+    mov     ax, bx
+    mov     cx, 4
+.dbg_write_size:
+    rol     ax, 4
+    push    ax
+    and     al, 0x0F
+    add     al, '0'
+    cmp     al, '9'
+    jbe     .dbg_ws_ok
+    add     al, 7
+.dbg_ws_ok:
+    mov     ah, 0x0E
+    push    bx
+    mov     bx, 0x0007
+    int     0x10
+    pop     bx
+    pop     ax
+    loop    .dbg_write_size
+    pop     es                  ; Restore ES
+    pop     cx
+    pop     bx
+    pop     ax
 
     pop     ax
     jmp     .alloc_done
@@ -152,6 +216,130 @@ mcb_alloc:
     ret
     
 .no_memory:
+    ; Debug: print chain start and first few MCBs
+    push    ax
+    push    bx
+    push    cx
+    push    es
+    push    di
+    ; Print "!MCB"
+    mov     al, '!'
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    mov     al, 'M'
+    int     0x10
+    mov     al, 'C'
+    int     0x10
+    mov     al, 'B'
+    int     0x10
+    mov     al, ':'
+    int     0x10
+    ; Print chain start segment
+    mov     ax, [mcb_chain_start]
+    mov     di, ax              ; DI = current MCB segment
+    mov     cx, 4
+.dbg_cs:
+    rol     ax, 4
+    push    ax
+    and     al, 0x0F
+    add     al, '0'
+    cmp     al, '9'
+    jbe     .dbg_cs_ok
+    add     al, 7
+.dbg_cs_ok:
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    pop     ax
+    loop    .dbg_cs
+    mov     al, ' '
+    mov     ah, 0x0E
+    int     0x10
+    ; Walk first 5 MCBs only
+    mov     cx, 5
+.dbg_walk:
+    push    cx
+    mov     es, di
+    ; Print signature as hex (2 digits)
+    mov     al, [es:0]
+    push    ax
+    shr     al, 4
+    and     al, 0x0F
+    add     al, '0'
+    cmp     al, '9'
+    jbe     .dbg_sig1
+    add     al, 7
+.dbg_sig1:
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    pop     ax
+    and     al, 0x0F
+    add     al, '0'
+    cmp     al, '9'
+    jbe     .dbg_sig2
+    add     al, 7
+.dbg_sig2:
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    ; Print size (4 hex)
+    mov     ax, [es:3]
+    push    ax                  ; Save size for next calc
+    mov     cx, 4
+.dbg_sz:
+    rol     ax, 4
+    push    ax
+    and     al, 0x0F
+    add     al, '0'
+    cmp     al, '9'
+    jbe     .dbg_sz_ok
+    add     al, 7
+.dbg_sz_ok:
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    pop     ax
+    loop    .dbg_sz
+    ; Print owner indicator
+    mov     ax, [es:1]
+    test    ax, ax
+    jz      .dbg_free
+    mov     al, '*'             ; In use
+    jmp     .dbg_own_print
+.dbg_free:
+    mov     al, '-'             ; Free
+.dbg_own_print:
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    mov     al, ' '
+    int     0x10
+    ; Check if last block
+    cmp     byte [es:0], 'Z'
+    je      .dbg_done
+    ; Calculate next: di = di + 1 + size
+    pop     ax                  ; Size
+    inc     ax
+    add     di, ax
+    pop     cx
+    loop    .dbg_walk
+    jmp     .dbg_exit
+.dbg_done:
+    pop     ax                  ; Clean up size from stack
+    pop     cx                  ; Clean up loop counter
+.dbg_exit:
+    mov     al, '!'
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    pop     di
+    pop     es
+    pop     cx
+    pop     bx
+    pop     ax
+
     mov     bx, dx              ; Return largest available
     stc
     pop     es

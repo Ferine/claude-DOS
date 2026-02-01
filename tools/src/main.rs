@@ -31,8 +31,8 @@ fn main() {
 
     if args.len() < 3 {
         eprintln!("Usage: mkfloppy <output.img> <vbr.bin> [file1:DOSNAME file2:DOSNAME ...]");
-        eprintln!("  DOSNAME is a DOS filename like STAGE2.BIN or IO.SYS");
-        eprintln!("  Example: mkfloppy floppy.img vbr.bin stage2.bin:STAGE2.BIN io.sys:IO.SYS");
+        eprintln!("  DOSNAME can be a simple filename (STAGE2.BIN) or include a path (DATOS/FILE.FLI)");
+        eprintln!("  Example: mkfloppy floppy.img vbr.bin stage2.bin:STAGE2.BIN data.fli:DATOS/DATA.FLI");
         std::process::exit(1);
     }
 
@@ -57,22 +57,36 @@ fn main() {
         }
 
         let file_path = parts[0];
-        let dos_name = parts[1];
-        let fat_name = to_fat_name(dos_name);
+        let dos_path = parts[1];
 
         let contents = fs::read(file_path).unwrap_or_else(|e| {
             eprintln!("Failed to read '{}': {}", file_path, e);
             std::process::exit(1);
         });
 
-        let cluster = img.add_file(&fat_name, &contents);
-        eprintln!(
-            "Added {} as {} (cluster {}, {} bytes)",
-            file_path,
-            dos_name,
-            cluster,
-            contents.len()
-        );
+        // Check if dos_path contains a directory component
+        let cluster = if dos_path.contains('/') {
+            // Path with subdirectory (e.g., "DATOS/FILE.FLI")
+            // Extract just the filename for the 8.3 name
+            let filename = dos_path.rsplit('/').next().unwrap();
+            let fat_name = to_fat_name(filename);
+            let c = img.add_file_with_path(dos_path, &fat_name, &contents);
+            eprintln!(
+                "Added {} as {} (cluster {}, {} bytes)",
+                file_path, dos_path, c, contents.len()
+            );
+            c
+        } else {
+            // Simple filename in root directory
+            let fat_name = to_fat_name(dos_path);
+            let c = img.add_file(&fat_name, &contents);
+            eprintln!(
+                "Added {} as {} (cluster {}, {} bytes)",
+                file_path, dos_path, c, contents.len()
+            );
+            c
+        };
+        let _ = cluster; // Suppress unused variable warning
     }
 
     fs::write(&output_path, img.as_bytes()).unwrap_or_else(|e| {

@@ -13,21 +13,135 @@ int21_3A:
     jmp     dos_set_error
 
 ; AH=3Bh - Change directory
+; Input: DS:DX = ASCIIZ path
 int21_3B:
-    ; Accept the path but just succeed for now
+    push    es
+    push    si
+    push    di
+    push    bx
+
+    ; Copy path from caller's DS:DX to path_buffer
+    push    ds
+    mov     ds, [cs:save_ds]
+    mov     si, [cs:save_dx]
+    push    cs
+    pop     es
+    mov     di, path_buffer
+    mov     cx, 127
+.cd_copy:
+    lodsb
+    stosb
+    test    al, al
+    jz      .cd_copied
+    loop    .cd_copy
+    mov     byte [es:di], 0
+.cd_copied:
+    pop     ds                      ; DS = kernel seg
+
+    ; Check for root directory special case
+    mov     si, path_buffer
+    ; Skip drive letter if present
+    cmp     byte [si + 1], ':'
+    jne     .cd_no_drive
+    add     si, 2
+.cd_no_drive:
+    ; Check if it's just "\" (root)
+    cmp     byte [si], '\'
+    jne     .cd_not_root
+    cmp     byte [si + 1], 0
+    jne     .cd_not_root
+    ; Change to root directory
+    mov     word [current_dir_cluster], 0
+    mov     byte [current_dir_path], 0
+    jmp     .cd_success
+.cd_not_root:
+
+    ; Resolve the path to find the target directory
+    mov     si, path_buffer
+    call    resolve_path
+    jc      .cd_not_found
+
+    ; AX = parent directory cluster, fcb_name_buffer = directory name
+    ; Search for the directory in its parent
+    push    ax                      ; Save parent cluster
+    mov     si, fcb_name_buffer
+    call    fat_find_in_directory
+    pop     bx                      ; BX = parent cluster (not needed)
+    jc      .cd_not_found
+
+    ; DI = directory entry pointer
+    ; Check if it's a directory
+    test    byte [di + 11], ATTR_DIRECTORY
+    jz      .cd_not_found           ; Not a directory
+
+    ; Get the directory's cluster
+    mov     ax, [di + 26]           ; First cluster
+
+    ; Update current directory state
+    mov     [current_dir_cluster], ax
+
+    ; Update current_dir_path
+    ; For simplicity, just copy the path (stripping drive letter)
+    mov     si, path_buffer
+    cmp     byte [si + 1], ':'
+    jne     .cd_copy_path
+    add     si, 2
+.cd_copy_path:
+    ; Skip leading backslash
+    cmp     byte [si], '\'
+    jne     .cd_copy_path2
+    inc     si
+.cd_copy_path2:
+    mov     di, current_dir_path
+    mov     cx, 63
+.cd_path_loop:
+    lodsb
+    stosb
+    test    al, al
+    jz      .cd_path_done
+    loop    .cd_path_loop
+    mov     byte [di], 0
+.cd_path_done:
+
+.cd_success:
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
     call    dos_clear_error
     ret
 
+.cd_not_found:
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_PATH_NOT_FOUND
+    jmp     dos_set_error
+
 ; AH=47h - Get current directory
+; Input: DL = drive (0=default), DS:SI = 64-byte buffer
+; Output: DS:SI = ASCIIZ path (without leading backslash)
 int21_47:
-    ; Return root directory "\" in DS:SI buffer
     push    es
     push    di
-    
+    push    si
+
+    ; Copy current_dir_path to caller's buffer
     mov     es, [save_ds]
     mov     di, [save_si]
-    mov     byte [es:di], 0      ; Empty string = root
-    
+    mov     si, current_dir_path
+    mov     cx, 63
+.getcwd_loop:
+    lodsb
+    stosb
+    test    al, al
+    jz      .getcwd_done
+    loop    .getcwd_loop
+    mov     byte [es:di], 0
+.getcwd_done:
+
+    pop     si
     pop     di
     pop     es
     call    dos_clear_error
@@ -63,15 +177,48 @@ int21_4E:
 .ff_copied:
     pop     ds                      ; DS = kernel seg
 
-    ; Convert to FCB-format wildcard pattern in search_name
+    ; Resolve path to get directory cluster
+    mov     si, path_buffer
+    call    resolve_path
+    jc      .ff_use_current         ; If path doesn't resolve, try as pattern in current dir
+
+    ; AX = directory cluster to search
+    mov     [search_dir_cluster], ax
+    jmp     .ff_setup_search
+
+.ff_use_current:
+    ; Use current directory
+    mov     ax, [current_dir_cluster]
+    mov     [search_dir_cluster], ax
+    ; fcb_name_buffer might be wrong, re-convert from path_buffer
+    mov     si, path_buffer
+    call    ff_name_to_pattern
+    jmp     .ff_do_search
+
+.ff_setup_search:
+    ; Convert final component (already in fcb_name_buffer) to search pattern
+    ; We need to re-parse for wildcards since resolve_path doesn't handle them
     mov     si, path_buffer
     call    ff_name_to_pattern
 
-    ; Initialize search state: start at root directory sector 19, entry 0
+.ff_do_search:
+    ; Initialize search state based on directory type
+    mov     ax, [search_dir_cluster]
+    test    ax, ax
+    jnz     .ff_subdir_search
+
+    ; Root directory: start at sector 19, entry 0
     mov     word [search_dir_sector], 19
     mov     word [search_dir_index], 0
+    mov     word [search_dir_cluster], 0
+    jmp     ff_search_loop
 
-    ; Fall through to FindNext logic
+.ff_subdir_search:
+    ; Subdirectory: search_dir_cluster already set
+    ; search_dir_sector will be computed from cluster
+    ; search_dir_index = 0
+    mov     word [search_dir_index], 0
+    ; Fall through to search loop
     jmp     ff_search_loop
 
 ; AH=4Fh - Find next matching file
@@ -82,20 +229,65 @@ int21_4F:
     push    bx
 
     ; Continue searching from saved state in DTA
+    ; Restore search state from DTA
+    push    ds
+    mov     ds, [cs:current_dta_seg]
+    mov     si, [cs:current_dta_off]
+    ; Copy search pattern from DTA
+    push    cs
+    pop     es
+    mov     di, search_name
+    mov     cx, 11
+    rep     movsb
+    ; Get search_attr
+    lodsb
+    mov     [cs:search_attr], al
+    ; Get search_dir_sector
+    lodsw
+    mov     [cs:search_dir_sector], ax
+    ; Get search_dir_index
+    lodsw
+    mov     [cs:search_dir_index], ax
+    ; Get search_dir_cluster
+    lodsw
+    mov     [cs:search_dir_cluster], ax
+    pop     ds                      ; DS = kernel seg
 
 ff_search_loop:
-    ; Check if we've exhausted root directory (14 sectors, starting at 19)
+    ; Check if searching root or subdirectory
+    mov     ax, [search_dir_cluster]
+    test    ax, ax
+    jnz     .ff_subdir_loop
+
+    ; Root directory: check if exhausted (14 sectors, starting at 19)
     mov     ax, [search_dir_sector]
     cmp     ax, 33                  ; 19 + 14 = 33
     jae     .ff_no_more
 
-    ; Read current directory sector
+    ; Read current root directory sector
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    jc      .ff_error
+    jmp     .ff_process_sector
+
+.ff_subdir_loop:
+    ; Subdirectory: read cluster and search
+    mov     ax, [search_dir_cluster]
+    cmp     ax, 0x0FF8              ; End of chain?
+    jae     .ff_no_more
+
+    ; Convert cluster to sector and read
+    call    fat_cluster_to_lba
+    mov     [search_dir_sector], ax ; Save sector for DTA
     push    cs
     pop     es
     mov     bx, disk_buffer
     call    fat_read_sector
     jc      .ff_error
 
+.ff_process_sector:
     ; Calculate entry pointer from index
     mov     ax, [search_dir_index]
     shl     ax, 5                   ; * 32 bytes per entry
@@ -163,19 +355,37 @@ ff_search_loop:
     jmp     .ff_check_entry
 
 .ff_next_sector:
+    ; Check if root or subdirectory
+    mov     ax, [search_dir_cluster]
+    test    ax, ax
+    jnz     .ff_next_cluster
+
+    ; Root directory: advance to next sector
     inc     word [search_dir_sector]
+    mov     word [search_dir_index], 0
+    jmp     ff_search_loop
+
+.ff_next_cluster:
+    ; Subdirectory: advance to next cluster in chain
+    mov     ax, [search_dir_cluster]
+    call    fat12_get_next_cluster
+    mov     [search_dir_cluster], ax
     mov     word [search_dir_index], 0
     jmp     ff_search_loop
 
 .ff_found:
     ; Found a match! Populate DTA
+    ; Advance index FIRST for next FindNext call
+    inc     word [search_dir_index]
+
     ; Get DTA address
     push    ds
     mov     es, [current_dta_seg]
     mov     bx, [current_dta_off]
 
     ; Store search state in reserved area of DTA (first 21 bytes)
-    ; Bytes 0-10: search pattern, 11: search attr, 12-13: dir sector, 14-15: dir index
+    ; Bytes 0-10: search pattern, 11: search attr, 12-13: dir sector,
+    ; 14-15: dir index (already incremented), 16-17: dir cluster, 18-20: reserved
     push    di
     push    cs
     pop     ds
@@ -189,8 +399,10 @@ ff_search_loop:
     stosw
     mov     ax, [search_dir_index]
     stosw
+    mov     ax, [search_dir_cluster]
+    stosw
     ; Fill remaining reserved bytes
-    mov     cx, 6
+    mov     cx, 4
     xor     al, al
     rep     stosb
     pop     di
@@ -222,10 +434,7 @@ ff_search_loop:
     call    ff_fcb_to_asciiz
     pop     di
 
-    ; Advance index for next FindNext call
-    inc     word [search_dir_index]
-
-    ; Success
+    ; Success (index already incremented at start of .ff_found)
     pop     bx
     pop     di
     pop     si

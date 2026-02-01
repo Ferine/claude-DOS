@@ -6,13 +6,101 @@
 ; Input: BX = paragraphs to allocate
 ; Output: AX = segment of allocated block, CF on error
 int21_48:
+    ; Debug: print allocation request with size
+    cmp     byte [cs:debug_trace], 0
+    je      .skip_48_trace
+    push    ax
+    push    bx
+    push    cx
+    mov     al, '&'
+    mov     ah, 0x0E
+    mov     bx, 0x0007
+    int     0x10
+    ; Print requested size (BX) in hex
+    mov     ax, [cs:save_bx]
+    mov     cx, 4
+.print_hex_48:
+    rol     ax, 4
+    push    ax
+    and     al, 0x0F
+    add     al, '0'
+    cmp     al, '9'
+    jbe     .hex_ok_48
+    add     al, 7
+.hex_ok_48:
+    mov     ah, 0x0E
+    mov     bx, 0x0007
+    int     0x10
+    pop     ax
+    loop    .print_hex_48
+    mov     al, '&'
+    mov     ah, 0x0E
+    int     0x10
+    pop     cx
+    pop     bx
+    pop     ax
+.skip_48_trace:
+
     mov     bx, [save_bx]
     call    mcb_alloc
     jc      .alloc_fail
+
+    ; Debug: print allocation success
+    cmp     byte [cs:debug_trace], 0
+    je      .skip_48_ok
+    push    ax
+    push    bx
+    mov     al, '$'
+    mov     ah, 0x0E
+    mov     bx, 0x0007
+    int     0x10
+    pop     bx
+    pop     ax
+.skip_48_ok:
+
     mov     [save_ax], ax
     call    dos_clear_error
     ret
 .alloc_fail:
+    ; Debug: print allocation failure with largest available
+    cmp     byte [cs:debug_trace], 0
+    je      .skip_48_fail
+    push    ax
+    push    cx
+    mov     al, '!'
+    mov     ah, 0x0E
+    push    bx
+    mov     bx, 0x0007
+    int     0x10
+    pop     bx
+    ; Print largest available (BX) in hex
+    mov     ax, bx
+    mov     cx, 4
+.print_hex_fail:
+    rol     ax, 4
+    push    ax
+    and     al, 0x0F
+    add     al, '0'
+    cmp     al, '9'
+    jbe     .hex_ok_fail
+    add     al, 7
+.hex_ok_fail:
+    mov     ah, 0x0E
+    push    bx
+    mov     bx, 0x0007
+    int     0x10
+    pop     bx
+    pop     ax
+    loop    .print_hex_fail
+    mov     al, '!'
+    mov     ah, 0x0E
+    push    bx
+    mov     bx, 0x0007
+    int     0x10
+    pop     bx
+    pop     cx
+    pop     ax
+.skip_48_fail:
     mov     [save_bx], bx       ; Largest available
     mov     ax, ERR_INSUFFICIENT_MEM
     jmp     dos_set_error

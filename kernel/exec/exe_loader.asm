@@ -92,6 +92,26 @@ load_exe:
     mov     [.skip_sectors], ax
     mov     [.header_offset], dx
 
+    ; Calculate load image size from MZ header (NOT file size!)
+    ; if last_page_bytes == 0: total = page_count * 512
+    ; else: total = (page_count - 1) * 512 + last_page_bytes
+    ; Then subtract header_bytes to get actual load size
+    mov     ax, [.page_count]
+    cmp     word [.last_page_bytes], 0
+    je      .full_page_calc
+    dec     ax                      ; (page_count - 1)
+.full_page_calc:
+    mov     cl, 9
+    shl     ax, cl                  ; AX = pages * 512
+    cmp     word [.last_page_bytes], 0
+    je      .no_last_page_add
+    add     ax, [.last_page_bytes]
+.no_last_page_add:
+    ; AX = total EXE image size in bytes (including header)
+    sub     ax, [.header_bytes]     ; Subtract header to get load image size
+    mov     [.bytes_to_load], ax
+    mov     word [.bytes_loaded], 0 ; Initialize bytes loaded counter
+
     ; Load the file cluster by cluster
     ; - Skip .skip_sectors worth of sectors entirely
     ; - On the first sector after skip, start copying from .header_offset
@@ -107,6 +127,11 @@ load_exe:
 .load_loop:
     cmp     ax, 0x0FF8
     jae     .load_done
+
+    ; Check if we've already loaded enough data
+    mov     cx, [.bytes_loaded]
+    cmp     cx, [.bytes_to_load]
+    jae     .load_done              ; Stop when we've loaded the required amount
 
     push    ax                      ; Save cluster number
 
@@ -146,6 +171,8 @@ load_exe:
     sub     cx, [.header_offset]    ; Copy fewer bytes
 
 .copy_full_sector:
+    ; Save bytes to copy for tracking
+    mov     [.last_copy_size], cx
     ; Save old BX to detect wrap
     mov     [.old_bx], bx
 
@@ -191,6 +218,9 @@ load_exe:
     ; After split, update destination and skip the wrap check
     ; (we already advanced ES during the split)
     mov     bx, di
+    ; Track bytes loaded
+    mov     ax, [.last_copy_size]
+    add     [.bytes_loaded], ax
     pop     dx
     pop     cx
     pop     di
@@ -210,6 +240,12 @@ load_exe:
 .copy_done:
     ; Update destination pointer
     mov     bx, di
+
+    ; Track bytes loaded (CX was bytes copied, but it's 0 after rep movsb)
+    ; We need to calculate from the difference in DI
+    ; Actually, we saved CX earlier - use [.last_copy_size]
+    mov     ax, [.last_copy_size]
+    add     [.bytes_loaded], ax
 
     pop     dx
     pop     cx
@@ -412,6 +448,9 @@ load_exe:
 .header_bytes      dw  0
 .page_count        dw  0
 .last_page_bytes   dw  0
+.bytes_to_load     dw  0           ; Total bytes to load (from MZ header)
+.bytes_loaded      dw  0           ; Bytes loaded so far
+.last_copy_size    dw  0           ; Bytes copied in last operation
 .reloc_count       dw  0
 .reloc_offset      dw  0
 .skip_sectors      dw  0

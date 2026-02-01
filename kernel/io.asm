@@ -108,6 +108,13 @@ kernel_entry:
 %include "mem/umb.asm"
 %include "mem/hma.asm"
 
+; XMS (Extended Memory) support
+%include "mem/xms.asm"
+%include "int2fh.asm"
+%include "int15h.asm"
+%include "int31h.asm"
+%include "int67h.asm"
+
 ; CONFIG.SYS parser
 %include "config.asm"
 
