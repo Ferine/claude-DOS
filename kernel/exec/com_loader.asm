@@ -50,7 +50,7 @@ load_com:
     add     bx, 512
 
     ; Get next cluster
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     cmp     ax, 0x0FF8
     jb      .load_loop
 

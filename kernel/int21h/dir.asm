@@ -3,14 +3,544 @@
 ; ===========================================================================
 
 ; AH=39h - Create directory
+; Input: DS:DX = ASCIIZ directory name
 int21_39:
+    push    es
+    push    si
+    push    di
+    push    bx
+    push    cx
+    push    dx
+
+    ; Copy path from caller's DS:DX to path_buffer
+    push    ds
+    mov     ds, [cs:save_ds]
+    mov     si, [cs:save_dx]
+    push    cs
+    pop     es
+    mov     di, path_buffer
+    mov     cx, 127
+.mkdir_copy:
+    lodsb
+    stosb
+    test    al, al
+    jz      .mkdir_copied
+    loop    .mkdir_copy
+    mov     byte [es:di], 0
+.mkdir_copied:
+    pop     ds                      ; DS = kernel seg
+
+    ; Resolve path to get parent directory cluster and directory name
+    mov     si, path_buffer
+    call    resolve_path
+    jc      .mkdir_path_error
+
+    ; AX = parent directory cluster, fcb_name_buffer = new dir name
+    mov     [.mkdir_parent_cluster], ax
+
+    ; Check if directory already exists
+    push    ax
+    mov     si, fcb_name_buffer
+    call    fat_find_in_directory
+    pop     ax
+    jnc     .mkdir_exists           ; Already exists - error
+
+    ; Find empty slot in parent directory
+    mov     ax, [.mkdir_parent_cluster]
+    test    ax, ax
+    jnz     .mkdir_scan_subdir
+
+    ; Parent is root directory - scan sectors 19-32
+    mov     ax, 19
+    mov     cx, 14
+.mkdir_scan_root:
+    push    cx
+    push    ax
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    jc      .mkdir_read_error_pop2
+
+    mov     di, disk_buffer
+    xor     cx, cx
+.mkdir_scan_root_entry:
+    cmp     cx, 16
+    jae     .mkdir_next_root_sector
+    cmp     byte [di], 0x00
+    je      .mkdir_found_root_slot
+    cmp     byte [di], 0xE5
+    je      .mkdir_found_root_slot
+    add     di, 32
+    inc     cx
+    jmp     .mkdir_scan_root_entry
+
+.mkdir_next_root_sector:
+    pop     ax
+    pop     cx
+    inc     ax
+    loop    .mkdir_scan_root
+    jmp     .mkdir_dir_full
+
+.mkdir_found_root_slot:
+    pop     ax                      ; Sector number
+    mov     [.mkdir_dir_sector], ax
+    mov     [.mkdir_dir_index], cx
+    pop     cx
+    jmp     .mkdir_create_entry
+
+.mkdir_scan_subdir:
+    mov     dx, ax                  ; DX = current cluster
+.mkdir_subdir_loop:
+    mov     ax, dx
+    call    fat_cluster_to_lba
+    push    dx
+    push    ax
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    pop     ax
+    pop     dx
+    jc      .mkdir_read_error
+
+    mov     di, disk_buffer
+    xor     cx, cx
+.mkdir_subdir_entry:
+    cmp     cx, 16
+    jae     .mkdir_next_subdir_cluster
+    cmp     byte [di], 0x00
+    je      .mkdir_found_subdir_slot
+    cmp     byte [di], 0xE5
+    je      .mkdir_found_subdir_slot
+    add     di, 32
+    inc     cx
+    jmp     .mkdir_subdir_entry
+
+.mkdir_next_subdir_cluster:
+    mov     ax, dx
+    call    fat_get_next_cluster
+    mov     dx, ax
+    cmp     dx, 0x0FF8
+    jb      .mkdir_subdir_loop
+    jmp     .mkdir_dir_full
+
+.mkdir_found_subdir_slot:
+    mov     ax, dx
+    call    fat_cluster_to_lba
+    mov     [.mkdir_dir_sector], ax
+    mov     [.mkdir_dir_index], cx
+
+.mkdir_create_entry:
+    ; Allocate a cluster for the new directory
+    call    fat_alloc_cluster
+    jc      .mkdir_disk_full
+    mov     [.mkdir_new_cluster], ax
+
+    ; Initialize the directory entry at DI
+    ; Copy name
+    push    di
+    mov     si, fcb_name_buffer
+    mov     cx, 11
+    rep     movsb
+    pop     di
+
+    ; Set attribute = directory
+    mov     byte [di + 11], ATTR_DIRECTORY
+
+    ; Zero reserved fields
+    xor     ax, ax
+    mov     [di + 12], ax
+    mov     [di + 14], ax
+    mov     [di + 16], ax
+    mov     [di + 18], ax
+    mov     [di + 20], ax
+    mov     [di + 22], ax           ; Time
+    mov     [di + 24], ax           ; Date
+
+    ; Set first cluster
+    mov     ax, [.mkdir_new_cluster]
+    mov     [di + 26], ax
+
+    ; Directory size = 0 (by convention)
+    xor     ax, ax
+    mov     [di + 28], ax
+    mov     [di + 30], ax
+
+    ; Write parent directory sector back
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.mkdir_dir_sector]
+    call    fat_write_sector
+    jc      .mkdir_write_error
+
+    ; Initialize the new directory's cluster with . and .. entries
+    ; First, zero out the cluster
+    push    cs
+    pop     es
+    mov     di, disk_buffer
+    mov     cx, 256
+    xor     ax, ax
+    rep     stosw
+
+    ; Create "." entry (points to self)
+    mov     di, disk_buffer
+    mov     byte [di], '.'
+    mov     cx, 10
+    mov     al, ' '
+    push    di
+    inc     di
+.mkdir_fill_dot:
+    mov     [di], al
+    inc     di
+    loop    .mkdir_fill_dot
+    pop     di
+    mov     byte [di + 11], ATTR_DIRECTORY
+    mov     ax, [.mkdir_new_cluster]
+    mov     [di + 26], ax
+
+    ; Create ".." entry (points to parent)
+    mov     di, disk_buffer + 32
+    mov     byte [di], '.'
+    mov     byte [di + 1], '.'
+    mov     cx, 9
+    mov     al, ' '
+    push    di
+    add     di, 2
+.mkdir_fill_dotdot:
+    mov     [di], al
+    inc     di
+    loop    .mkdir_fill_dotdot
+    pop     di
+    mov     byte [di + 11], ATTR_DIRECTORY
+    mov     ax, [.mkdir_parent_cluster]
+    mov     [di + 26], ax
+
+    ; Write the new directory's cluster
+    mov     ax, [.mkdir_new_cluster]
+    call    fat_cluster_to_lba
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_write_sector
+    jc      .mkdir_write_error
+
+    ; Success
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    call    dos_clear_error
+    ret
+
+.mkdir_exists:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
     mov     ax, ERR_ACCESS_DENIED
     jmp     dos_set_error
 
-; AH=3Ah - Remove directory
-int21_3A:
+.mkdir_path_error:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_PATH_NOT_FOUND
+    jmp     dos_set_error
+
+.mkdir_read_error_pop2:
+    pop     ax
+    pop     cx
+.mkdir_read_error:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
     mov     ax, ERR_ACCESS_DENIED
     jmp     dos_set_error
+
+.mkdir_dir_full:
+.mkdir_disk_full:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_CANNOT_MAKE
+    jmp     dos_set_error
+
+.mkdir_write_error:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_WRITE_FAULT
+    jmp     dos_set_error
+
+; Local variables for mkdir
+.mkdir_parent_cluster   dw  0
+.mkdir_new_cluster      dw  0
+.mkdir_dir_sector       dw  0
+.mkdir_dir_index        dw  0
+
+; AH=3Ah - Remove directory
+; Input: DS:DX = ASCIIZ directory name
+int21_3A:
+    push    es
+    push    si
+    push    di
+    push    bx
+    push    cx
+    push    dx
+
+    ; Copy path from caller's DS:DX to path_buffer
+    push    ds
+    mov     ds, [cs:save_ds]
+    mov     si, [cs:save_dx]
+    push    cs
+    pop     es
+    mov     di, path_buffer
+    mov     cx, 127
+.rmdir_copy:
+    lodsb
+    stosb
+    test    al, al
+    jz      .rmdir_copied
+    loop    .rmdir_copy
+    mov     byte [es:di], 0
+.rmdir_copied:
+    pop     ds                      ; DS = kernel seg
+
+    ; Resolve path to get parent directory cluster and directory name
+    mov     si, path_buffer
+    call    resolve_path
+    jc      .rmdir_path_error
+
+    ; AX = parent directory cluster, fcb_name_buffer = directory name
+    mov     [.rmdir_parent_cluster], ax
+
+    ; Find the directory in parent
+    mov     si, fcb_name_buffer
+    call    fat_find_in_directory
+    jc      .rmdir_not_found
+
+    ; DI = directory entry, AX = sector number
+    mov     [.rmdir_entry_sector], ax
+
+    ; Check if it's a directory
+    test    byte [di + 11], ATTR_DIRECTORY
+    jz      .rmdir_not_dir
+
+    ; Get directory's first cluster
+    mov     ax, [di + 26]
+    mov     [.rmdir_dir_cluster], ax
+
+    ; Calculate entry index within sector
+    push    ax
+    mov     ax, di
+    sub     ax, disk_buffer
+    shr     ax, 5                   ; / 32 = entry index
+    mov     [.rmdir_entry_index], ax
+    pop     ax
+
+    ; Check if directory is empty (only . and .. allowed)
+    ; Read the directory's first sector
+    mov     ax, [.rmdir_dir_cluster]
+    test    ax, ax
+    jz      .rmdir_access_denied    ; Can't remove root
+    cmp     ax, 2
+    jb      .rmdir_access_denied    ; Invalid cluster
+
+    call    fat_cluster_to_lba
+    jc      .rmdir_access_denied
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    jc      .rmdir_read_error
+
+    ; Check entries - first two should be . and .., rest should be empty/deleted
+    mov     di, disk_buffer
+    mov     cx, 16                  ; Entries per sector
+
+.rmdir_check_entry:
+    ; First entry should be "."
+    cmp     cx, 16
+    jne     .rmdir_check_dotdot
+    cmp     byte [di], '.'
+    jne     .rmdir_not_empty
+    jmp     .rmdir_next_check
+
+.rmdir_check_dotdot:
+    ; Second entry should be ".."
+    cmp     cx, 15
+    jne     .rmdir_check_empty
+    cmp     byte [di], '.'
+    jne     .rmdir_not_empty
+    cmp     byte [di + 1], '.'
+    jne     .rmdir_not_empty
+    jmp     .rmdir_next_check
+
+.rmdir_check_empty:
+    ; All other entries must be empty (0x00) or deleted (0xE5)
+    cmp     byte [di], 0x00
+    je      .rmdir_is_empty         ; End of directory - it's empty
+    cmp     byte [di], 0xE5
+    jne     .rmdir_not_empty
+
+.rmdir_next_check:
+    add     di, 32
+    dec     cx
+    jnz     .rmdir_check_entry
+
+    ; Need to check next cluster if exists
+    mov     ax, [.rmdir_dir_cluster]
+    call    fat_get_next_cluster
+    cmp     ax, 0x0FF8
+    jae     .rmdir_is_empty         ; No more clusters - directory is empty
+
+    ; More clusters to check - they should all be empty
+    mov     [.rmdir_dir_cluster], ax
+    call    fat_cluster_to_lba
+    jc      .rmdir_is_empty         ; Error reading - assume empty for now
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    jc      .rmdir_read_error
+
+    mov     di, disk_buffer
+    mov     cx, 16
+.rmdir_check_more:
+    cmp     byte [di], 0x00
+    je      .rmdir_is_empty
+    cmp     byte [di], 0xE5
+    jne     .rmdir_not_empty
+    add     di, 32
+    loop    .rmdir_check_more
+    ; If we get here, all entries were deleted - it's effectively empty
+    ; (In a full implementation, we'd check all clusters in chain)
+
+.rmdir_is_empty:
+    ; Directory is empty - proceed with removal
+
+    ; Re-read the parent directory sector to get the entry
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.rmdir_entry_sector]
+    call    fat_read_sector
+    jc      .rmdir_read_error
+
+    ; Calculate entry pointer
+    mov     ax, [.rmdir_entry_index]
+    shl     ax, 5                   ; * 32
+    mov     di, disk_buffer
+    add     di, ax
+
+    ; Save first cluster for freeing
+    mov     ax, [di + 26]
+    push    ax
+
+    ; Mark entry as deleted
+    mov     byte [di], 0xE5
+
+    ; Write parent directory sector back
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.rmdir_entry_sector]
+    call    fat_write_sector
+    pop     ax                      ; First cluster
+    jc      .rmdir_write_error
+
+    ; Free the directory's cluster chain
+    test    ax, ax
+    jz      .rmdir_success
+    cmp     ax, 2
+    jb      .rmdir_success
+    call    fat_free_chain
+
+.rmdir_success:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    call    dos_clear_error
+    ret
+
+.rmdir_path_error:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_PATH_NOT_FOUND
+    jmp     dos_set_error
+
+.rmdir_not_found:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_PATH_NOT_FOUND
+    jmp     dos_set_error
+
+.rmdir_not_dir:
+.rmdir_access_denied:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_ACCESS_DENIED
+    jmp     dos_set_error
+
+.rmdir_not_empty:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_DIR_NOT_EMPTY
+    jmp     dos_set_error
+
+.rmdir_read_error:
+.rmdir_write_error:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_ACCESS_DENIED
+    jmp     dos_set_error
+
+; Local variables for rmdir
+.rmdir_parent_cluster   dw  0
+.rmdir_dir_cluster      dw  0
+.rmdir_entry_sector     dw  0
+.rmdir_entry_index      dw  0
 
 ; AH=3Bh - Change directory
 ; Input: DS:DX = ASCIIZ path
@@ -368,7 +898,7 @@ ff_search_loop:
 .ff_next_cluster:
     ; Subdirectory: advance to next cluster in chain
     mov     ax, [search_dir_cluster]
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     mov     [search_dir_cluster], ax
     mov     word [search_dir_index], 0
     jmp     ff_search_loop

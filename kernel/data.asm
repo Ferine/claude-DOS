@@ -150,7 +150,7 @@ dpb_a:
     .num_fats       db  2
     .root_entries   dw  224
     .data_start     dw  33
-    .max_cluster    dw  0           ; Highest cluster + 1
+    .max_cluster    dw  2849        ; Highest cluster + 1 (for 1.44MB floppy)
     .fat_size       dw  9           ; Sectors per FAT (was db, needs to be word for FAT16)
     .root_start     dw  19
     .device_ptr     dd  0           ; Pointer to device driver
@@ -159,3 +159,28 @@ dpb_a:
     .next_dpb       dd  0           ; Pointer to next DPB
     .first_free     dw  2           ; First free cluster (search hint)
     .free_count     dw  0xFFFF      ; Free clusters (-1 = unknown)
+    .fat_type       db  12          ; FAT type: 12 for FAT12, 16 for FAT16
+
+; ---------------------------------------------------------------------------
+; Disk Parameter Block (DPB) for RAM disk (drive D:)
+; ---------------------------------------------------------------------------
+dpb_ramdisk:
+    .drive          db  3           ; Drive number (3=D:)
+    .unit           db  0           ; Unit number
+    .bytes_per_sec  dw  512
+    .sec_per_clus   db  0           ; Sectors per cluster - 1
+    .clus_shift     db  0           ; Log2(sectors per cluster)
+    .rsvd_sectors   dw  1
+    .num_fats       db  2
+    .root_entries   dw  112
+    .data_start     dw  12          ; 1 boot + 2*2 FAT + 7 root dir sectors
+    .max_cluster    dw  0           ; Filled at init
+    .fat_size       dw  2           ; Sectors per FAT
+    .root_start     dw  5           ; 1 boot + 2*2 FAT sectors
+    .device_ptr     dd  0           ; Pointer to device driver
+    .media_byte     db  0xF8        ; Fixed disk media byte
+    .access_flag    db  0
+    .next_dpb       dd  0
+    .first_free     dw  2
+    .free_count     dw  0xFFFF
+    .fat_type       db  12          ; FAT12

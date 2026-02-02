@@ -84,6 +84,7 @@ kernel_entry:
 ; FAT filesystem
 %include "fat/common.asm"
 %include "fat/fat12.asm"
+%include "fat/fat16.asm"
 
 ; Memory management
 %include "mem/mcb.asm"
@@ -122,6 +123,7 @@ kernel_entry:
 %include "device/aux.asm"
 %include "device/prn.asm"
 %include "device/clock.asm"
+%include "device/ramdisk.asm"
 
 ; ---------------------------------------------------------------------------
 ; bios_print_string - Print null-terminated string at DS:SI via BIOS

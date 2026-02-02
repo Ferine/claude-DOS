@@ -232,7 +232,7 @@ int21_14:
 
 .walk_chain:
     push    cx
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     pop     cx
     cmp     ax, 0x0FF8
     jae     .eof                    ; Unexpected EOF
@@ -331,7 +331,7 @@ int21_14:
     mov     cx, [.cluster_index]
 .walk2:
     push    cx
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     pop     cx
     dec     cx
     jnz     .walk2
@@ -521,7 +521,7 @@ int21_21:
 
 .walk_chain_21:
     push    cx
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     pop     cx
     cmp     ax, 0x0FF8
     jae     .eof_21

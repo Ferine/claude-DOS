@@ -85,8 +85,10 @@ ERR_LOCK            equ     0x21
 ERR_DISK_CHANGE     equ     0x22
 ERR_NO_FCB          equ     0x23
 ERR_FILE_EXISTS     equ     0x50
+ERR_DIR_NOT_EMPTY   equ     0x51        ; Directory not empty
 ERR_CANNOT_MAKE     equ     0x52
 ERR_FAIL_INT24      equ     0x53
+ERR_DISK_FULL       equ     0x27        ; Disk full (for write operations)
 
 ; INT 21h function numbers (commonly used)
 DOS_TERMINATE       equ     0x00

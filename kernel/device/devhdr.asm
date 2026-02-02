@@ -31,9 +31,13 @@ init_devices:
     mov     word [prn_device + DEV_HDR.next_off], clock_device
     mov     [prn_device + DEV_HDR.next_seg], cs
 
-    ; CLOCK$ is last
-    mov     word [clock_device + DEV_HDR.next_off], 0xFFFF
-    mov     word [clock_device + DEV_HDR.next_seg], 0xFFFF
+    ; Link CLOCK$ -> RAMDISK
+    mov     word [clock_device + DEV_HDR.next_off], ramdisk_device
+    mov     [clock_device + DEV_HDR.next_seg], cs
+
+    ; RAMDISK is last
+    mov     word [ramdisk_device + DEV_HDR.next_off], 0xFFFF
+    mov     word [ramdisk_device + DEV_HDR.next_seg], 0xFFFF
 
     pop     ax
     pop     es

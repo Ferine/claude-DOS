@@ -275,7 +275,7 @@ load_exe:
     inc     dx                      ; Sector count
 
     pop     ax                      ; Restore cluster number
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     jmp     .load_loop
 
 .read_error_pop:
@@ -305,7 +305,7 @@ load_exe:
 
 .reloc_skip_cluster:
     push    bx
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     pop     bx
     cmp     ax, 0x0FF8
     jae     .read_error             ; Unexpected EOF
@@ -340,7 +340,7 @@ load_exe:
     ; Need to read next sector - advance cluster
     push    cx
     mov     ax, [.reloc_cur_cluster]
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     cmp     ax, 0x0FF8
     jae     .reloc_eof_pop          ; Unexpected EOF
     mov     [.reloc_cur_cluster], ax

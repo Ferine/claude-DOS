@@ -22,7 +22,7 @@ fat16_get_next_cluster:
     ; Which FAT sector?
     mov     cx, ax
     shr     cx, 9               ; sector index
-    add     cx, 1               ; FAT starts after reserved
+    add     cx, [dpb_a.rsvd_sectors] ; FAT starts after reserved sectors
 
     cmp     cx, [fat_buffer_sector]
     je      .cached
@@ -109,7 +109,7 @@ fat16_set_cluster:
     shl     bx, 1
     mov     cx, bx
     shr     cx, 9
-    add     cx, 1
+    add     cx, [dpb_a.rsvd_sectors] ; FAT starts after reserved sectors
 
     cmp     cx, [fat_buffer_sector]
     je      .cached
@@ -132,6 +132,7 @@ fat16_set_cluster:
     add     si, bx
     mov     [si], dx
 
+    ; Write FAT sector back (primary FAT)
     push    ax
     push    dx
     mov     ax, [fat_buffer_sector]
@@ -139,6 +140,12 @@ fat16_set_cluster:
     pop     es
     mov     bx, fat_buffer
     call    fat_write_sector
+
+    ; Write to backup FAT (FAT2) for mirroring
+    mov     ax, [fat_buffer_sector]
+    add     ax, [dpb_a.fat_size]    ; FAT2 = FAT1 + fat_size
+    call    fat_write_sector
+
     pop     dx
     pop     ax
 

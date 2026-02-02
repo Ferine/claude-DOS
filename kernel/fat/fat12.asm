@@ -24,7 +24,7 @@ fat12_get_next_cluster:
     ; Which sector of FAT? (offset / 512)
     push    cx
     shr     cx, 9               ; CX = sector index into FAT
-    add     cx, 1               ; Add reserved sectors (FAT starts at sector 1)
+    add     cx, [dpb_a.rsvd_sectors] ; Add reserved sectors from DPB
     
     ; Read FAT sector if not cached
     cmp     cx, [fat_buffer_sector]
@@ -145,7 +145,7 @@ fat12_set_cluster:
     ; Which FAT sector?
     push    cx
     shr     cx, 9
-    add     cx, 1
+    add     cx, [dpb_a.rsvd_sectors] ; Add reserved sectors from DPB
 
     cmp     cx, [fat_buffer_sector]
     je      .cached
@@ -186,7 +186,7 @@ fat12_set_cluster:
 .write_back:
     mov     [si], ax
 
-    ; Write FAT sector back
+    ; Write FAT sector back (primary FAT)
     push    ax
     push    dx
     mov     ax, [fat_buffer_sector]
@@ -194,6 +194,12 @@ fat12_set_cluster:
     pop     es
     mov     bx, fat_buffer
     call    fat_write_sector
+
+    ; Write to backup FAT (FAT2) for mirroring
+    mov     ax, [fat_buffer_sector]
+    add     ax, [dpb_a.fat_size]    ; FAT2 = FAT1 + fat_size
+    call    fat_write_sector
+
     pop     dx
     pop     ax
 

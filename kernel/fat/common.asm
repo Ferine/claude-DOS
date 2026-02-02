@@ -3,14 +3,20 @@
 ; ===========================================================================
 
 ; ---------------------------------------------------------------------------
-; fat_read_sector - Read one sector from disk
+; fat_read_sector - Read one sector from disk with retry
 ; Input: AX = LBA sector number, ES:BX = buffer
 ; Uses boot_drive from kernel data
 ; ---------------------------------------------------------------------------
+DISK_RETRY_COUNT    equ     3           ; Number of retries for disk I/O
+
 fat_read_sector:
     pusha
+    mov     [.read_lba], ax             ; Save LBA for retries
+    mov     byte [.read_retries], DISK_RETRY_COUNT
 
-    ; LBA to CHS for 1.44MB floppy
+.read_retry:
+    mov     ax, [.read_lba]
+    ; LBA to CHS
     xor     dx, dx
     div     word [fat_spt]      ; AX = LBA/SPT, DX = LBA%SPT
     inc     dl
@@ -24,23 +30,39 @@ fat_read_sector:
     mov     dl, [boot_drive]
     mov     ax, 0x0201          ; Read 1 sector
     int     0x13
-    jc      .read_err
+    jnc     .read_ok
 
-    popa
-    ret
+    ; Error - reset disk and retry
+    xor     ax, ax
+    int     0x13                ; Reset disk
+    dec     byte [.read_retries]
+    jnz     .read_retry
 
-.read_err:
+    ; All retries failed
     popa
     stc
     ret
 
+.read_ok:
+    popa
+    clc
+    ret
+
+.read_lba       dw  0
+.read_retries   db  0
+
 ; ---------------------------------------------------------------------------
-; fat_write_sector - Write one sector to disk
+; fat_write_sector - Write one sector to disk with retry
 ; Input: AX = LBA sector number, ES:BX = buffer
 ; ---------------------------------------------------------------------------
 fat_write_sector:
     pusha
+    mov     [.write_lba], ax            ; Save LBA for retries
+    mov     byte [.write_retries], DISK_RETRY_COUNT
 
+.write_retry:
+    mov     ax, [.write_lba]
+    ; LBA to CHS
     xor     dx, dx
     div     word [fat_spt]
     inc     dl
@@ -54,25 +76,63 @@ fat_write_sector:
     mov     dl, [boot_drive]
     mov     ax, 0x0301          ; Write 1 sector
     int     0x13
-    jc      .write_err
+    jnc     .write_ok
 
-    popa
-    ret
+    ; Error - reset disk and retry
+    xor     ax, ax
+    int     0x13                ; Reset disk
+    dec     byte [.write_retries]
+    jnz     .write_retry
 
-.write_err:
+    ; All retries failed
     popa
     stc
     ret
 
+.write_ok:
+    popa
+    clc
+    ret
+
+.write_lba      dw  0
+.write_retries  db  0
+
 ; ---------------------------------------------------------------------------
 ; fat_cluster_to_lba - Convert cluster number to LBA
 ; Input: AX = cluster number
-; Output: AX = LBA sector number
+; Output: AX = LBA sector number, CF set on invalid cluster
 ; ---------------------------------------------------------------------------
 fat_cluster_to_lba:
+    ; Validate cluster number
+    cmp     ax, 2                   ; Clusters 0 and 1 are reserved
+    jb      .invalid
+    cmp     ax, [dpb_a.max_cluster] ; Check against maximum
+    jae     .check_special
+
+    ; Valid data cluster - convert to LBA
     sub     ax, 2
-    ; For 1.44MB floppy: data_start = 33, sec_per_cluster = 1
-    add     ax, 33
+    add     ax, [dpb_a.data_start]  ; Use DPB data_start instead of hardcoded 33
+    clc
+    ret
+
+.check_special:
+    ; Check for end-of-chain markers (0xFF8-0xFFF for FAT12, 0xFFF8-0xFFFF for FAT16)
+    cmp     ax, 0x0FF8
+    jae     .end_of_chain
+    ; Check for bad cluster marker (0xFF7 for FAT12, 0xFFF7 for FAT16)
+    cmp     ax, 0x0FF7
+    je      .bad_cluster
+    cmp     ax, 0xFFF7
+    je      .bad_cluster
+
+.invalid:
+.bad_cluster:
+    stc                             ; Set carry flag for invalid cluster
+    ret
+
+.end_of_chain:
+    ; End of chain is not really invalid, but can't be converted to LBA
+    stc
     ret
 
 ; ---------------------------------------------------------------------------
@@ -329,7 +389,7 @@ fat_find_in_directory:
     ; Move to next cluster in chain
     push    si
     mov     ax, dx
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     mov     dx, ax
     pop     si
     cmp     dx, 0x0FF8
@@ -347,7 +407,7 @@ fat_find_in_directory:
     ; Continue to next cluster
     push    si
     mov     ax, dx
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     mov     dx, ax
     pop     si
     cmp     dx, 0x0FF8
@@ -744,3 +804,45 @@ resolve_path:
     pop     bx
     stc
     ret
+
+; ===========================================================================
+; FAT Type Dispatch Wrappers
+; These dispatch to FAT12 or FAT16 functions based on dpb_a.fat_type
+; ===========================================================================
+
+; ---------------------------------------------------------------------------
+; fat_get_next_cluster - Dispatch to FAT12 or FAT16 get_next_cluster
+; Input: AX = current cluster
+; Output: AX = next cluster (>= 0xFF8/0xFFF8 = end of chain)
+; ---------------------------------------------------------------------------
+fat_get_next_cluster:
+    cmp     byte [dpb_a.fat_type], 16
+    je      fat16_get_next_cluster
+    jmp     fat12_get_next_cluster
+
+; ---------------------------------------------------------------------------
+; fat_alloc_cluster - Dispatch to FAT12 or FAT16 alloc_cluster
+; Output: AX = allocated cluster, CF set if disk full
+; ---------------------------------------------------------------------------
+fat_alloc_cluster:
+    cmp     byte [dpb_a.fat_type], 16
+    je      fat16_alloc_cluster
+    jmp     fat12_alloc_cluster
+
+; ---------------------------------------------------------------------------
+; fat_set_cluster - Dispatch to FAT12 or FAT16 set_cluster
+; Input: AX = cluster number, DX = value to set
+; ---------------------------------------------------------------------------
+fat_set_cluster:
+    cmp     byte [dpb_a.fat_type], 16
+    je      fat16_set_cluster
+    jmp     fat12_set_cluster
+
+; ---------------------------------------------------------------------------
+; fat_free_chain - Dispatch to FAT12 or FAT16 free_chain
+; Input: AX = first cluster of chain to free
+; ---------------------------------------------------------------------------
+fat_free_chain:
+    cmp     byte [dpb_a.fat_type], 16
+    je      fat16_free_chain
+    jmp     fat12_free_chain

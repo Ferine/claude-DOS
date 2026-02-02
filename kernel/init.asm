@@ -483,6 +483,18 @@ init_data_areas:
     mov     word [di + CDS.flags], CDS_VALID | CDS_PHYSICAL
     mov     word [di + CDS.backslash_off], 2
 
+    ; Initialize CDS for RAM disk drive D: (index 3)
+    mov     di, cds_table + (CDS_SIZE * 3)
+    mov     byte [di + CDS.path], 'D'
+    mov     byte [di + CDS.path + 1], ':'
+    mov     byte [di + CDS.path + 2], '\'
+    mov     byte [di + CDS.path + 3], 0
+    mov     word [di + CDS.flags], CDS_VALID | CDS_PHYSICAL
+    mov     word [di + CDS.backslash_off], 2
+    ; Link CDS to RAM disk DPB
+    mov     word [di + CDS.dpb_ptr], dpb_ramdisk
+    mov     [di + CDS.dpb_ptr + 2], cs
+
     ; Set default DTA to PSP:0080h (no PSP yet, use kernel area)
     mov     word [current_dta_off], default_dta
     mov     [current_dta_seg], cs
@@ -601,7 +613,7 @@ load_shell:
     add     bx, 512
 
     ; Get next cluster
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     cmp     ax, 0x0FF8
     jb      .load_cluster
 

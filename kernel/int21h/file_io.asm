@@ -216,9 +216,8 @@ int21_3C:
     jc      .cr_path_not_found
 
     ; AX = directory cluster, fcb_name_buffer = filename
-    ; For now, only allow creating in root directory
-    test    ax, ax
-    jnz     .cr_subdir_denied
+    ; Save target directory cluster for later use
+    mov     [create_dir_cluster], ax
 
     ; Check if file already exists
     mov     si, fcb_name_buffer
@@ -226,7 +225,12 @@ int21_3C:
     jnc     .cr_truncate            ; File exists - truncate it
 
     ; File doesn't exist - create new directory entry
-    ; Search for empty slot in root directory
+    ; Check if creating in root or subdirectory
+    mov     ax, [create_dir_cluster]
+    test    ax, ax
+    jnz     .cr_scan_subdir
+
+    ; Root directory: scan sectors 19-32
     mov     ax, 19                  ; Root dir start
     mov     cx, 14                  ; Root dir sectors
 
@@ -272,6 +276,55 @@ int21_3C:
     mov     [search_dir_sector], ax
     mov     [search_dir_index], cx
     pop     cx                      ; Restore outer CX
+    jmp     .cr_init_entry
+
+.cr_scan_subdir:
+    ; Subdirectory: walk cluster chain looking for empty slot
+    mov     dx, ax                  ; DX = current cluster
+.cr_subdir_loop:
+    mov     ax, dx
+    call    fat_cluster_to_lba
+    push    dx                      ; Save current cluster
+    push    ax                      ; Save sector number
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    pop     ax                      ; Restore sector number
+    pop     dx                      ; Restore current cluster
+    jc      .cr_read_error_nostack
+
+    ; Search 16 entries per sector
+    mov     di, disk_buffer
+    xor     cx, cx
+.cr_subdir_entry:
+    cmp     cx, 16
+    jae     .cr_subdir_next_cluster
+    cmp     byte [di], 0x00         ; Empty
+    je      .cr_found_subdir_slot
+    cmp     byte [di], 0xE5         ; Deleted
+    je      .cr_found_subdir_slot
+    add     di, 32
+    inc     cx
+    jmp     .cr_subdir_entry
+
+.cr_subdir_next_cluster:
+    ; Move to next cluster in chain
+    mov     ax, dx
+    call    fat_get_next_cluster
+    mov     dx, ax
+    cmp     dx, 0x0FF8
+    jb      .cr_subdir_loop
+    jmp     .cr_dir_full            ; Directory full, no empty slots
+
+.cr_found_subdir_slot:
+    ; Found empty slot: DX = cluster, CX = entry index, DI = entry pointer
+    mov     ax, dx
+    call    fat_cluster_to_lba
+    mov     [search_dir_sector], ax
+    mov     [search_dir_index], cx
+
+.cr_init_entry:
 
     ; Initialize directory entry
     ; Copy FCB name
@@ -331,7 +384,7 @@ int21_3C:
     jz      .cr_no_chain
     cmp     ax, 2
     jb      .cr_no_chain
-    call    fat12_free_chain
+    call    fat_free_chain
 
 .cr_no_chain:
     ; Reset file to empty
@@ -432,6 +485,17 @@ int21_3C:
     mov     ax, ERR_ACCESS_DENIED
     jmp     dos_set_error
 
+.cr_read_error_nostack:
+    ; Read error with no extra values on stack (subdirectory case)
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_ACCESS_DENIED
+    jmp     dos_set_error
+
 .cr_dir_full:
     pop     dx
     pop     cx
@@ -450,17 +514,6 @@ int21_3C:
     pop     si
     pop     es
     mov     ax, ERR_PATH_NOT_FOUND
-    jmp     dos_set_error
-
-.cr_subdir_denied:
-    ; Creating files in subdirectories not yet supported
-    pop     dx
-    pop     cx
-    pop     bx
-    pop     di
-    pop     si
-    pop     es
-    mov     ax, ERR_ACCESS_DENIED
     jmp     dos_set_error
 
 ; AH=3Dh - Open file
@@ -874,7 +927,7 @@ int21_3F:
     push    cx
     push    dx
     mov     ax, [cs:bp + SFT_ENTRY.cur_cluster]
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     cmp     ax, 0x0FF8
     jae     .chain_end
     mov     [cs:bp + SFT_ENTRY.cur_cluster], ax
@@ -1013,8 +1066,8 @@ int21_40:
     push    dx
     push    ds
     push    cs
-    pop     ds                      ; DS = kernel for fat12_alloc_cluster
-    call    fat12_alloc_cluster
+    pop     ds                      ; DS = kernel for fat_alloc_cluster
+    call    fat_alloc_cluster
     pop     ds
     pop     dx
     pop     cx
@@ -1033,7 +1086,7 @@ int21_40:
     push    cs
     pop     ds
     mov     dx, bx                  ; New cluster as value
-    call    fat12_set_cluster       ; Set AX's next to DX
+    call    fat_set_cluster       ; Set AX's next to DX
     pop     ds
     pop     dx
     pop     cx
@@ -1161,7 +1214,7 @@ int21_40:
     push    cs
     pop     ds
     mov     ax, [cs:bp + SFT_ENTRY.cur_cluster]
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     mov     [cs:bp + SFT_ENTRY.cur_cluster], ax
     inc     word [cs:bp + SFT_ENTRY.rel_cluster]
     pop     ds
@@ -1200,7 +1253,7 @@ int21_40:
     pop     di
     pop     si
     pop     es
-    mov     ax, ERR_INSUFFICIENT_MEM
+    mov     ax, ERR_DISK_FULL       ; Disk full error (not memory error)
     jmp     dos_set_error
 
 .write_error:
@@ -1344,7 +1397,7 @@ int21_41:
     jz      .del_done
     cmp     ax, 2
     jb      .del_done
-    call    fat12_free_chain
+    call    fat_free_chain
 
 .del_done:
     pop     bx
@@ -1425,9 +1478,12 @@ int21_42:
     jmp     .seek_walk
 
 .seek_end:
-    ; pos = file_size + CX:DX (signed)
+    ; pos = file_size + CX:DX (signed offset)
     add     dx, [cs:bp + SFT_ENTRY.file_size]
     adc     cx, [cs:bp + SFT_ENTRY.file_size + 2]
+    ; Validate result is not negative (high bit set = negative in signed)
+    test    cx, 0x8000
+    jnz     .seek_bad               ; Negative position is invalid
     mov     [cs:bp + SFT_ENTRY.file_pos], dx
     mov     [cs:bp + SFT_ENTRY.file_pos + 2], cx
 
@@ -1459,7 +1515,7 @@ int21_42:
 
 .walk_loop:
     push    cx
-    call    fat12_get_next_cluster
+    call    fat_get_next_cluster
     pop     cx
     cmp     ax, 0x0FF8
     jae     .seek_found
@@ -1855,9 +1911,206 @@ int21_46:
     jmp     dos_set_error
 
 ; AH=56h - Rename file
+; Input: DS:DX = old ASCIIZ name, ES:DI = new ASCIIZ name
 int21_56:
+    push    es
+    push    si
+    push    di
+    push    bx
+    push    cx
+    push    dx
+
+    ; Copy old filename from caller's DS:DX to path_buffer
+    push    ds
+    mov     ds, [cs:save_ds]
+    mov     si, [cs:save_dx]
+    push    cs
+    pop     es
+    mov     di, path_buffer
+    mov     cx, 127
+.ren_copy_old:
+    lodsb
+    stosb
+    test    al, al
+    jz      .ren_copied_old
+    loop    .ren_copy_old
+    mov     byte [es:di], 0
+.ren_copied_old:
+    pop     ds                      ; DS = kernel seg
+
+    ; Resolve old path to find the file
+    mov     si, path_buffer
+    call    resolve_path
+    jc      .ren_not_found
+
+    ; AX = directory cluster, fcb_name_buffer = filename
+    mov     [.ren_dir_cluster], ax
+
+    ; Find file in directory
+    mov     si, fcb_name_buffer
+    call    fat_find_in_directory
+    jc      .ren_not_found
+
+    ; DI = directory entry, AX = sector number
+    mov     [.ren_entry_sector], ax
+
+    ; Calculate entry index
+    push    ax
+    mov     ax, di
+    sub     ax, disk_buffer
+    shr     ax, 5                   ; / 32 = entry index
+    mov     [.ren_entry_index], ax
+    pop     ax
+
+    ; Check if read-only
+    test    byte [di + 11], ATTR_READ_ONLY
+    jnz     .ren_access_denied
+
+    ; Copy new filename from caller's ES:DI to path_buffer
+    ; Note: Original ES:DI are in save_es and save_di
+    push    ds
+    mov     ds, [cs:save_es]
+    mov     si, [cs:save_di]
+    push    cs
+    pop     es
+    mov     di, path_buffer
+    mov     cx, 127
+.ren_copy_new:
+    lodsb
+    stosb
+    test    al, al
+    jz      .ren_copied_new
+    loop    .ren_copy_new
+    mov     byte [es:di], 0
+.ren_copied_new:
+    pop     ds                      ; DS = kernel seg
+
+    ; Resolve new path
+    mov     si, path_buffer
+    call    resolve_path
+    jc      .ren_path_error
+
+    ; AX = new directory cluster, fcb_name_buffer = new filename
+    ; Check that new path is in same directory (simple rename only)
+    cmp     ax, [.ren_dir_cluster]
+    jne     .ren_not_same_dev       ; Cross-directory rename not supported
+
+    ; Check if new name already exists
+    push    ax
+    mov     si, fcb_name_buffer
+    call    fat_find_in_directory
+    pop     ax
+    jnc     .ren_exists             ; New name already exists
+
+    ; Save new FCB name
+    mov     si, fcb_name_buffer
+    mov     di, .ren_new_name
+    mov     cx, 11
+    rep     movsb
+
+    ; Re-read the directory sector with the old entry
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.ren_entry_sector]
+    call    fat_read_sector
+    jc      .ren_read_error
+
+    ; Calculate entry pointer
+    mov     ax, [.ren_entry_index]
+    shl     ax, 5                   ; * 32
+    mov     di, disk_buffer
+    add     di, ax
+
+    ; Copy new name to entry (first 11 bytes)
+    mov     si, .ren_new_name
+    mov     cx, 11
+    rep     movsb
+
+    ; Write directory sector back
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.ren_entry_sector]
+    call    fat_write_sector
+    jc      .ren_write_error
+
+    ; Success
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    call    dos_clear_error
+    ret
+
+.ren_not_found:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_FILE_NOT_FOUND
+    jmp     dos_set_error
+
+.ren_path_error:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_PATH_NOT_FOUND
+    jmp     dos_set_error
+
+.ren_access_denied:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
     mov     ax, ERR_ACCESS_DENIED
     jmp     dos_set_error
+
+.ren_not_same_dev:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_NOT_SAME_DEV
+    jmp     dos_set_error
+
+.ren_exists:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_FILE_EXISTS
+    jmp     dos_set_error
+
+.ren_read_error:
+.ren_write_error:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_ACCESS_DENIED
+    jmp     dos_set_error
+
+; Local variables for rename
+.ren_dir_cluster    dw  0
+.ren_entry_sector   dw  0
+.ren_entry_index    dw  0
+.ren_new_name       times 11 db 0
 
 ; AH=57h - Get/Set file date/time
 int21_57:
@@ -1875,3 +2128,8 @@ int21_5B:
 int21_6C:
     mov     ax, ERR_INVALID_FUNC
     jmp     dos_set_error
+
+; ---------------------------------------------------------------------------
+; File I/O local data
+; ---------------------------------------------------------------------------
+create_dir_cluster  dw  0           ; Target directory cluster for file creation
