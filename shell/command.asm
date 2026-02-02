@@ -160,6 +160,9 @@ cmd_loop:
     mov     bl, [cmd_buffer + 1] ; Length
     mov     byte [cmd_buffer + 2 + bx], 0
 
+    ; Parse redirection operators (>, >>, <)
+    call    parse_redirection
+
     ; Parse and execute
     mov     si, cmd_buffer + 2   ; Point to command text
     call    skip_spaces
@@ -168,14 +171,25 @@ cmd_loop:
     cmp     byte [si], 0
     je      cmd_loop
 
+    ; Set up redirection before executing command
+    call    setup_redirection
+    jc      .redir_failed
+
     ; Try internal commands first
     call    try_internal_cmd
     test    al, al               ; AL=1 if handled
-    jnz     cmd_loop
+    jnz     .cmd_done
 
     ; Try to run as external command
     call    try_external_cmd
 
+.cmd_done:
+    ; Clean up redirection after command
+    call    cleanup_redirection
+    jmp     cmd_loop
+
+.redir_failed:
+    ; Redirection setup failed - already printed error
     jmp     cmd_loop
 
 ; ---------------------------------------------------------------------------
@@ -416,7 +430,13 @@ try_external_cmd:
     jnc     .exec_done
 
 .not_found:
-    ; Neither .COM nor .EXE found
+    ; Neither .COM nor .EXE found in current directory
+    ; Try searching PATH
+    call    search_path_for_cmd
+    test    al, al
+    jnz     .exec_done              ; Found and executed via PATH
+
+    ; Not found anywhere
     push    cs
     pop     ds
     mov     dx, msg_bad_cmd
@@ -446,6 +466,144 @@ try_external_cmd:
     pop     ds
     push    cs
     pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; search_path_for_cmd - Search PATH directories for command
+; Uses cmd_word for command name, exec_pblock already set up
+; Output: AL = 1 if found and executed, 0 if not found
+; ---------------------------------------------------------------------------
+search_path_for_cmd:
+    push    bx
+    push    cx
+    push    dx
+    push    si
+    push    di
+
+    ; Check if PATH is empty
+    cmp     byte [path_value], 0
+    je      .path_not_found
+
+    ; SI will walk through path_value
+    mov     si, path_value
+
+.try_next_dir:
+    ; Check if end of PATH
+    cmp     byte [si], 0
+    je      .path_not_found
+
+    ; Build: directory + "\" + cmd_word + ".COM"
+    mov     di, ext_filename
+
+    ; Copy directory until ; or end
+.copy_dir:
+    lodsb
+    test    al, al
+    jz      .dir_done
+    cmp     al, ';'
+    je      .dir_done
+    stosb
+    jmp     .copy_dir
+
+.dir_done:
+    ; Add backslash if not already there
+    cmp     byte [di-1], '\'
+    je      .has_slash
+    mov     byte [di], '\'
+    inc     di
+.has_slash:
+
+    ; Save SI position (might be at ; or NUL)
+    push    si
+
+    ; Copy command name
+    push    di                      ; Save position for extension
+    mov     si, cmd_word
+.copy_cmd_path:
+    lodsb
+    test    al, al
+    jz      .add_com
+    stosb
+    jmp     .copy_cmd_path
+
+.add_com:
+    ; Add ".COM"
+    mov     byte [di], '.'
+    mov     byte [di+1], 'C'
+    mov     byte [di+2], 'O'
+    mov     byte [di+3], 'M'
+    mov     byte [di+4], 0
+    pop     di                      ; DI = position where we'll change extension
+
+    ; Try to execute
+    push    cs
+    pop     ds
+    mov     dx, ext_filename
+    push    cs
+    pop     es
+    mov     bx, exec_pblock
+    mov     ax, 0x4B00
+    int     0x21
+    jnc     .path_found
+
+    ; Try .EXE
+    push    di
+    mov     di, ext_filename
+.find_dot_path:
+    cmp     byte [di], '.'
+    je      .change_to_exe
+    cmp     byte [di], 0
+    je      .try_next_path
+    inc     di
+    jmp     .find_dot_path
+
+.change_to_exe:
+    mov     byte [di+1], 'E'
+    mov     byte [di+2], 'X'
+    mov     byte [di+3], 'E'
+    pop     di
+
+    push    cs
+    pop     ds
+    mov     dx, ext_filename
+    push    cs
+    pop     es
+    mov     bx, exec_pblock
+    mov     ax, 0x4B00
+    int     0x21
+    jnc     .path_found
+
+.try_next_path:
+    pop     si                      ; Restore position in PATH
+    ; If we stopped at NUL, we're done
+    cmp     byte [si-1], 0
+    je      .path_not_found
+    ; Otherwise skip any extra separators
+    jmp     .try_next_dir
+
+.path_found:
+    pop     si                      ; Clean up stack
+    ; Get error level
+    mov     ah, 0x4D
+    int     0x21
+    push    cs
+    pop     ds
+    mov     [last_errorlevel], ax
+    mov     al, 1                   ; Return success
+    pop     di
+    pop     si
+    pop     dx
+    pop     cx
+    pop     bx
+    ret
+
+.path_not_found:
+    xor     al, al                  ; Return failure
+    pop     di
+    pop     si
+    pop     dx
+    pop     cx
+    pop     bx
     ret
 
 ; External command data

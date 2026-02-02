@@ -565,15 +565,151 @@ batch_if:
 ; ---------------------------------------------------------------------------
 ; batch_substitute - Perform %N parameter substitution
 ; Input: DS:SI = line buffer (modified in place)
+; Substitutes %0 with batch filename, %1-%9 with parameters
 ; ---------------------------------------------------------------------------
 batch_substitute:
-    ; Simple implementation: scan for %0-%9 and replace
-    ; For now, just leave as-is (basic stub)
+    pusha
+
+    ; Copy line to temp buffer while substituting
+    mov     si, batch_line_buf
+    mov     di, batch_subst_buf
+
+.subst_loop:
+    lodsb
+    test    al, al
+    jz      .subst_done
+
+    cmp     al, '%'
+    jne     .store_char
+
+    ; Found %, check next char
+    mov     al, [si]
+    cmp     al, '0'
+    jb      .not_param
+    cmp     al, '9'
+    ja      .not_param
+
+    ; It's %0-%9 - substitute parameter
+    sub     al, '0'                 ; AL = parameter number (0-9)
+    inc     si                      ; Skip the digit
+
+    ; Get the parameter
+    push    si
+    push    di
+    xor     bh, bh
+    mov     bl, al                  ; BX = param number
+    call    batch_get_param         ; SI = pointer to param string
+    pop     di
+
+    ; Copy parameter value to output
+.copy_param:
+    lodsb
+    test    al, al
+    jz      .param_done
+    stosb
+    jmp     .copy_param
+
+.param_done:
+    pop     si
+    jmp     .subst_loop
+
+.not_param:
+    ; Just a % followed by something else, store the %
+    mov     al, '%'
+
+.store_char:
+    stosb
+    jmp     .subst_loop
+
+.subst_done:
+    stosb                           ; Store null terminator
+
+    ; Copy result back to original buffer
+    mov     si, batch_subst_buf
+    mov     di, batch_line_buf
+.copy_back:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .copy_back
+
+    popa
+    ret
+
+; ---------------------------------------------------------------------------
+; batch_get_param - Get pointer to Nth parameter
+; Input: BX = parameter number (0-9)
+; Output: SI = pointer to ASCIIZ parameter (or empty string)
+; ---------------------------------------------------------------------------
+batch_get_param:
+    ; %0 = batch filename
+    test    bx, bx
+    jz      .return_filename
+
+    ; %1-%9 = parameters from batch_params
+    mov     si, batch_params
+    mov     cx, bx                  ; Number of params to skip
+
+    ; Skip leading spaces
+    call    .skip_sp
+
+.skip_params:
+    dec     cx
+    jz      .found_param
+
+    ; Skip current parameter (until space or end)
+.skip_word:
+    lodsb
+    test    al, al
+    jz      .empty_param            ; Ran out of parameters
+    cmp     al, ' '
+    jne     .skip_word
+
+    ; Skip spaces between params
+    call    .skip_sp
+    cmp     byte [si], 0
+    je      .empty_param
+    jmp     .skip_params
+
+.found_param:
+    ; SI points to start of parameter
+    ; Need to null-terminate it in a temp buffer
+    mov     di, batch_param_temp
+.copy_p:
+    lodsb
+    test    al, al
+    jz      .end_p
+    cmp     al, ' '
+    je      .end_p
+    stosb
+    jmp     .copy_p
+.end_p:
+    mov     byte [di], 0
+    mov     si, batch_param_temp
+    ret
+
+.empty_param:
+    mov     si, batch_empty_str
+    ret
+
+.return_filename:
+    mov     si, batch_file
+    ret
+
+.skip_sp:
+    cmp     byte [si], ' '
+    jne     .skip_sp_done
+    inc     si
+    jmp     .skip_sp
+.skip_sp_done:
     ret
 
 ; ---------------------------------------------------------------------------
 ; Batch data
 ; ---------------------------------------------------------------------------
+batch_subst_buf     times 256 db 0  ; Temp buffer for substitution
+batch_param_temp    times 128 db 0  ; Temp buffer for single parameter
+batch_empty_str     db  0           ; Empty string
 batch_line_buf  times 256 db 0
 batch_char_buf  db  0
 batch_cmd_word  times 12 db 0
