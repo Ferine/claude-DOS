@@ -37,6 +37,9 @@ kernel_init:
     ; Install INT 67h (EMS/VCPI stub)
     call    install_int67
 
+    ; Install INT 08h/1Ch (timer interrupts)
+    call    install_int08
+
     ; Install default CPU exception handlers (for debugging)
     call    install_exception_handlers
 
@@ -197,6 +200,64 @@ install_int67:
     pop     ax
     pop     es
     ret
+
+; ---------------------------------------------------------------------------
+; install_int08 - Install INT 08h (timer) and INT 1Ch (user timer) handlers
+; ---------------------------------------------------------------------------
+install_int08:
+    push    es
+    push    ax
+    xor     ax, ax
+    mov     es, ax
+
+    ; Save old INT 08h (at 0x0020)
+    mov     ax, [es:0x0020]
+    mov     [int08_old_vector], ax
+    mov     ax, [es:0x0022]
+    mov     [int08_old_vector + 2], ax
+
+    ; Install INT 08h
+    cli
+    mov     word [es:0x0020], int08_handler
+    mov     [es:0x0022], cs
+    sti
+
+    ; Save old INT 1Ch (at 0x0070)
+    mov     ax, [es:0x0070]
+    mov     [int1c_old_vector], ax
+    mov     ax, [es:0x0072]
+    mov     [int1c_old_vector + 2], ax
+
+    ; Install INT 1Ch
+    cli
+    mov     word [es:0x0070], int1c_handler
+    mov     [es:0x0072], cs
+    sti
+
+    pop     ax
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; INT 08h handler - Timer tick (18.2 Hz)
+; ---------------------------------------------------------------------------
+int08_handler:
+    push    ax
+    push    ds
+    mov     ax, cs
+    mov     ds, ax
+    add     word [ticks_count], 1
+    adc     word [ticks_count + 2], 0
+    pop     ds
+    pop     ax
+    int     0x1C
+    jmp     far [cs:int08_old_vector]
+
+; ---------------------------------------------------------------------------
+; INT 1Ch handler - User timer tick
+; ---------------------------------------------------------------------------
+int1c_handler:
+    jmp     far [cs:int1c_old_vector]
 
 ; ---------------------------------------------------------------------------
 ; install_exception_handlers - Install default CPU exception handlers

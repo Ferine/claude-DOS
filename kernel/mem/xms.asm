@@ -655,28 +655,46 @@ xms_realloc_emb:
     pop     dx
 
     ; Check if handle is in use
-    mov     ax, [cs:si]
+    mov     ax, [cs:si]             ; AX = old size
     test    ax, ax
     jz      .invalid_realloc
 
-    ; Simple realloc: adjust size and free memory
-    ; (Real impl would need to handle fragmentation)
-    push    bx
-    add     [cs:xms_free_kb], ax    ; Return old size
-    sub     [cs:xms_free_kb], bx    ; Subtract new size
-    jc      .realloc_fail           ; Not enough memory
-    mov     [cs:si], bx             ; Update handle size
-    pop     bx
+    ; Realloc: check BEFORE modifying free memory
+    ; AX = old size, BX = new size
+    cmp     bx, ax
+    je      .realloc_same
+    ja      .realloc_grow
 
+    ; Shrinking: delta = old - new, add to free
+    push    ax
+    sub     ax, bx
+    add     [cs:xms_free_kb], ax
+    pop     ax
+    jmp     .realloc_update
+
+.realloc_grow:
+    ; Growing: delta = new - old, check availability
+    push    bx
+    sub     bx, ax
+    cmp     bx, [cs:xms_free_kb]
+    ja      .realloc_fail_pop
+    sub     [cs:xms_free_kb], bx
+    pop     bx
+    jmp     .realloc_update
+
+.realloc_fail_pop:
+    pop     bx
+    jmp     .invalid_realloc_mem    ; Return error
+
+.realloc_update:
+    mov     [cs:si], bx
+.realloc_same:
     mov     ax, 1
     xor     bl, bl
     pop     si
     retf
 
-.realloc_fail:
-    pop     bx
-    add     [cs:xms_free_kb], bx    ; Restore free count
-    sub     [cs:xms_free_kb], ax
+.invalid_realloc_mem:
     mov     ax, 0
     mov     bl, 0A0h                ; Out of memory
     pop     si

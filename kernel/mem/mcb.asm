@@ -374,11 +374,53 @@ mcb_free:
     ret
     
 .valid:
-    ; Mark as free
-    mov     word [es:1], 0
-    
-    ; TODO: coalesce adjacent free blocks
-    
+    mov     word [es:1], 0          ; Mark as free
+
+    ; Coalesce with next block if free
+    cmp     byte [es:0], 'Z'
+    je      .free_done              ; Last block
+
+    push    bx
+    push    cx
+    push    dx
+
+    mov     ax, es
+    mov     cx, [es:3]              ; Current size
+    add     ax, cx
+    inc     ax                      ; Next MCB segment
+
+    push    es
+    mov     es, ax
+    cmp     byte [es:0], 'M'
+    je      .check_free
+    cmp     byte [es:0], 'Z'
+    je      .check_free
+    pop     es
+    jmp     .no_coalesce
+
+.check_free:
+    cmp     word [es:1], 0
+    jne     .not_free
+
+    ; Merge: size += 1 + next_size
+    mov     dx, [es:3]
+    mov     bl, [es:0]
+    pop     es
+    add     cx, dx
+    inc     cx
+    mov     [es:3], cx
+    mov     [es:0], bl
+    jmp     .coalesce_done
+
+.not_free:
+    pop     es
+.no_coalesce:
+.coalesce_done:
+    pop     dx
+    pop     cx
+    pop     bx
+
+.free_done:
     clc
     pop     es
     pop     ax
@@ -490,7 +532,7 @@ mcb_resize:
     jb      .not_enough
 
     ; Save next block's signature
-    mov     al, [es:0]              ; Next block's signature
+    mov     dl, [es:0]              ; Next block's signature
 
     pop     es                      ; ES = original MCB
 
@@ -509,7 +551,7 @@ mcb_resize:
     add     ax, bx
     inc     ax
     mov     es, ax
-    mov     [es:0], al              ; Use saved signature... wait, AL was clobbered
+    mov     [es:0], dl              ; Use saved signature from DL
 
     ; Actually recalculate: the new free block gets the old next block's signature
     ; We saved it in AL above but it got clobbered. Let's fix the approach.
@@ -543,7 +585,7 @@ mcb_resize:
     ; Use entire merged area
     mov     [es:3], bx
     ; Keep signature from next block (if next was 'Z', we become 'Z')
-    mov     [es:0], al              ; AL still has next block's sig
+    mov     [es:0], dl              ; DL still has next block's sig
     jmp     .resize_ok
 
 .grow_resplit:

@@ -16,6 +16,11 @@ shell_available     db  0           ; 1 if COMMAND.COM can be loaded
 return_code         dw  0           ; Last program return code
 alloc_strategy      db  0           ; Memory allocation strategy
 
+; Timer tick counter (18.2 Hz)
+ticks_count         dd  0
+int08_old_vector    dd  0
+int1c_old_vector    dd  0
+
 ; DOS version info
 dos_version_major   db  DOS_VERSION_MAJOR
 dos_version_minor   db  DOS_VERSION_MINOR
