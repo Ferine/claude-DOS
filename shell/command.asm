@@ -832,6 +832,7 @@ internal_cmds:
     dw      cmd_name_date,   cmd_date
     dw      cmd_name_time,   cmd_time
     dw      cmd_name_vol,    cmd_vol
+    dw      cmd_name_help,   cmd_help
     dw      cmd_name_exit,   cmd_exit
     dw      0, 0                           ; End of table
 
@@ -858,6 +859,7 @@ cmd_name_prompt db  'PROMPT', 0
 cmd_name_date   db  'DATE', 0
 cmd_name_time   db  'TIME', 0
 cmd_name_vol    db  'VOL', 0
+cmd_name_help   db  'HELP', 0
 cmd_name_exit   db  'EXIT', 0
 
 ; ---------------------------------------------------------------------------
@@ -896,6 +898,7 @@ msg_bad_cmd     db  'Bad command or file name', 0x0D, 0x0A, '$'
 %include "internal/path_cmd.asm"
 %include "internal/prompt_cmd.asm"
 %include "internal/vol_cmd.asm"
+%include "internal/help_cmd.asm"
 
 ; Batch file interpreter
 %include "batch.asm"
