@@ -201,14 +201,69 @@ cmd_loop:
 
 ; ---------------------------------------------------------------------------
 ; show_prompt - Display the command prompt
-; Default: "C:\>" style, driven by PROMPT variable
+; Interprets prompt_string with $X tokens
 ; ---------------------------------------------------------------------------
 show_prompt:
     pusha
 
-    ; Simple prompt: drive letter + :\>
+    mov     si, prompt_string
+.prompt_loop:
+    lodsb
+    test    al, al
+    jz      .prompt_done
+
+    cmp     al, '$'
+    jne     .print_char
+
+    ; Handle token
+    lodsb
+    test    al, al
+    jz      .prompt_done
+
+    ; Uppercase the token
+    cmp     al, 'a'
+    jb      .check_token
+    cmp     al, 'z'
+    ja      .check_token
+    sub     al, 0x20
+
+.check_token:
+    cmp     al, 'P'             ; $P = current path
+    je      .token_path
+    cmp     al, 'N'             ; $N = current drive
+    je      .token_drive
+    cmp     al, 'G'             ; $G = >
+    je      .token_gt
+    cmp     al, 'L'             ; $L = <
+    je      .token_lt
+    cmp     al, 'Q'             ; $Q = =
+    je      .token_eq
+    cmp     al, 'B'             ; $B = |
+    je      .token_pipe
+    cmp     al, '$'             ; $$ = $
+    je      .token_dollar
+    cmp     al, '_'             ; $_ = CRLF
+    je      .token_crlf
+    cmp     al, 'D'             ; $D = date
+    je      .token_date
+    cmp     al, 'T'             ; $T = time
+    je      .token_time
+    ; Unknown token - print literal
+    mov     dl, '$'
+    mov     ah, 0x02
+    int     0x21
+.print_char:
+    mov     dl, al
+    mov     ah, 0x02
+    int     0x21
+    jmp     .prompt_loop
+
+.token_path:
+    ; Print drive:\path
+    push    si
     mov     ah, 0x19            ; Get current drive
     int     0x21
+    push    ax                  ; Save drive number
     add     al, 'A'
     mov     dl, al
     mov     ah, 0x02
@@ -217,9 +272,137 @@ show_prompt:
     int     0x21
     mov     dl, '\'
     int     0x21
-    mov     dl, '>'
+    ; Get current directory via INT 21h/47h
+    pop     ax                  ; Drive number
+    inc     al                  ; 0=default, 1=A:, etc.
+    mov     dl, al
+    push    cs
+    pop     ds
+    mov     si, prompt_path_buf
+    mov     ah, 0x47
     int     0x21
+    ; Print the path
+    mov     si, prompt_path_buf
+.print_path:
+    lodsb
+    test    al, al
+    jz      .path_done
+    mov     dl, al
+    mov     ah, 0x02
+    int     0x21
+    jmp     .print_path
+.path_done:
+    pop     si
+    jmp     .prompt_loop
 
+.token_drive:
+    mov     ah, 0x19
+    int     0x21
+    add     al, 'A'
+    mov     dl, al
+    mov     ah, 0x02
+    int     0x21
+    jmp     .prompt_loop
+
+.token_gt:
+    mov     dl, '>'
+    mov     ah, 0x02
+    int     0x21
+    jmp     .prompt_loop
+
+.token_lt:
+    mov     dl, '<'
+    mov     ah, 0x02
+    int     0x21
+    jmp     .prompt_loop
+
+.token_eq:
+    mov     dl, '='
+    mov     ah, 0x02
+    int     0x21
+    jmp     .prompt_loop
+
+.token_pipe:
+    mov     dl, '|'
+    mov     ah, 0x02
+    int     0x21
+    jmp     .prompt_loop
+
+.token_dollar:
+    mov     dl, '$'
+    mov     ah, 0x02
+    int     0x21
+    jmp     .prompt_loop
+
+.token_crlf:
+    mov     dl, 0x0D
+    mov     ah, 0x02
+    int     0x21
+    mov     dl, 0x0A
+    int     0x21
+    jmp     .prompt_loop
+
+.token_date:
+    push    si
+    mov     ah, 0x2A
+    int     0x21
+    ; Print MM-DD-YYYY
+    mov     al, dh
+    call    .print_2digit
+    mov     dl, '-'
+    mov     ah, 0x02
+    int     0x21
+    pop     si
+    push    si
+    mov     ah, 0x2A
+    int     0x21
+    mov     al, dl
+    call    .print_2digit
+    mov     dl, '-'
+    mov     ah, 0x02
+    int     0x21
+    pop     si
+    push    si
+    mov     ah, 0x2A
+    int     0x21
+    mov     ax, cx
+    call    print_dec16
+    pop     si
+    jmp     .prompt_loop
+
+.token_time:
+    push    si
+    mov     ah, 0x2C
+    int     0x21
+    mov     al, ch
+    call    .print_2digit
+    mov     dl, ':'
+    mov     ah, 0x02
+    int     0x21
+    pop     si
+    push    si
+    mov     ah, 0x2C
+    int     0x21
+    mov     al, cl
+    call    .print_2digit
+    pop     si
+    jmp     .prompt_loop
+
+.print_2digit:
+    ; Print AL as 2 digits with leading zero
+    cmp     al, 10
+    jae     .p2d_no_lead
+    push    ax
+    mov     dl, '0'
+    mov     ah, 0x02
+    int     0x21
+    pop     ax
+.p2d_no_lead:
+    xor     ah, ah
+    call    print_dec16
+    ret
+
+.prompt_done:
     popa
     ret
 
@@ -685,6 +868,7 @@ cmd_buffer:
 
 cmd_word        times 18 db 0   ; Current command word (uppercase)
 cmd_args        dw  0           ; Pointer to arguments
+prompt_path_buf times 68 db 0   ; Buffer for current path in prompt
 
 ; Messages
 msg_bad_cmd     db  'Bad command or file name', 0x0D, 0x0A, '$'
