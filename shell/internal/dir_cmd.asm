@@ -1,9 +1,49 @@
 ; ===========================================================================
 ; DIR command - Display directory listing
+; Options: /P = pause after each screenful
+;          /W = wide format (5 columns)
 ; ===========================================================================
 
 cmd_dir:
     pusha
+
+    ; Parse options
+    mov     byte [dir_opt_pause], 0
+    mov     byte [dir_opt_wide], 0
+    mov     word [dir_file_count], 0
+    mov     word [dir_dir_count], 0
+    mov     word [dir_total_size], 0
+    mov     word [dir_total_size + 2], 0
+    mov     byte [dir_line_count], 0
+    mov     byte [dir_col_count], 0
+
+    ; Save SI (filespec start)
+    mov     [dir_filespec], si
+
+.parse_opts:
+    cmp     byte [si], 0
+    je      .opts_done
+    cmp     byte [si], '/'
+    jne     .next_char
+    ; Check option
+    inc     si
+    mov     al, [si]
+    or      al, 0x20            ; Lowercase
+    cmp     al, 'p'
+    jne     .not_p
+    mov     byte [dir_opt_pause], 1
+    jmp     .skip_opt
+.not_p:
+    cmp     al, 'w'
+    jne     .skip_opt
+    mov     byte [dir_opt_wide], 1
+.skip_opt:
+    inc     si
+    jmp     .parse_opts
+.next_char:
+    inc     si
+    jmp     .parse_opts
+.opts_done:
 
     ; Print header
     mov     dx, dir_header
@@ -11,54 +51,117 @@ cmd_dir:
     int     0x21
 
     ; Use FindFirst/FindNext to list files
-    ; Set DTA to our buffer
     mov     dx, dir_dta
     mov     ah, 0x1A
     int     0x21
 
-    ; FindFirst: DS:DX = filespec, CX = attributes
-    mov     dx, si              ; Use argument as filespec
-    cmp     byte [si], 0        ; No argument?
+    ; FindFirst
+    mov     si, [dir_filespec]
+    mov     dx, si
+    cmp     byte [si], 0
+    jne     .check_slash
+    mov     dx, dir_all_spec
+    jmp     .have_spec
+.check_slash:
+    cmp     byte [si], '/'
     jne     .have_spec
-    mov     dx, dir_all_spec    ; Default: "*.*"
+    mov     dx, dir_all_spec
 .have_spec:
-    mov     cx, 0x37            ; All attributes including dirs
+    mov     cx, 0x37            ; All attributes
     mov     ah, 0x4E
     int     0x21
     jc      .no_files
 
 .show_entry:
-    ; DTA+21 = attribute, DTA+22 = time, DTA+24 = date,
-    ; DTA+26 = size (dword), DTA+30 = name (13 bytes)
-
     ; Check if directory
     test    byte [dir_dta + 21], 0x10
-    jnz     .show_dir
+    jnz     .is_dir
 
-    ; Print filename (padded to 13 chars)
+    ; Count files and add size
+    inc     word [dir_file_count]
+    mov     ax, [dir_dta + 26]
+    add     [dir_total_size], ax
+    mov     ax, [dir_dta + 28]
+    adc     [dir_total_size + 2], ax
+
+    ; Wide or normal format?
+    cmp     byte [dir_opt_wide], 1
+    je      .show_wide
+
+    ; Normal format: filename + size
     mov     si, dir_dta + 30
     call    .print_padded_name
 
-    ; Print file size (32-bit)
-    mov     ax, [dir_dta + 26]  ; Low word of size
-    mov     dx, [dir_dta + 28]  ; High word of size
+    mov     ax, [dir_dta + 26]
+    mov     dx, [dir_dta + 28]
     call    print_dec32
 
     call    print_crlf
+    call    .check_pause
     jmp     .find_next
 
-.show_dir:
+.is_dir:
+    inc     word [dir_dir_count]
+
+    cmp     byte [dir_opt_wide], 1
+    je      .show_dir_wide
+
+    ; Normal format: dirname + <DIR>
     mov     si, dir_dta + 30
     call    .print_padded_name
     mov     dx, dir_dir_tag
     mov     ah, 0x09
     int     0x21
     call    print_crlf
+    call    .check_pause
+    jmp     .find_next
+
+.show_wide:
+    ; Wide format: just name in columns
+    mov     si, dir_dta + 30
+    call    .print_wide_name
+    jmp     .find_next
+
+.show_dir_wide:
+    ; Wide format with [dirname]
+    mov     dl, '['
+    mov     ah, 0x02
+    int     0x21
+    mov     si, dir_dta + 30
+    call    .print_wide_dir
+    mov     dl, ']'
+    mov     ah, 0x02
+    int     0x21
+    ; Pad to column width
+    call    .wide_next_col
+    jmp     .find_next
 
 .find_next:
     mov     ah, 0x4F
     int     0x21
     jnc     .show_entry
+
+    ; End of listing - finish wide line if needed
+    cmp     byte [dir_opt_wide], 1
+    jne     .show_summary
+    cmp     byte [dir_col_count], 0
+    je      .show_summary
+    call    print_crlf
+
+.show_summary:
+    ; Print summary
+    call    print_crlf
+    mov     ax, [dir_file_count]
+    call    print_dec16
+    mov     dx, dir_files_msg
+    mov     ah, 0x09
+    int     0x21
+    mov     ax, [dir_total_size]
+    mov     dx, [dir_total_size + 2]
+    call    print_dec32
+    mov     dx, dir_bytes_msg
+    mov     ah, 0x09
+    int     0x21
 
 .no_files:
     popa
@@ -89,9 +192,103 @@ cmd_dir:
     pop     cx
     ret
 
+.print_wide_name:
+    ; Print name padded to 15 chars for wide format
+    push    cx
+    xor     cx, cx
+.pwn_loop:
+    lodsb
+    test    al, al
+    jz      .pwn_pad
+    mov     dl, al
+    mov     ah, 0x02
+    int     0x21
+    inc     cx
+    jmp     .pwn_loop
+.pwn_pad:
+    cmp     cx, 14
+    jae     .pwn_next
+    mov     dl, ' '
+    mov     ah, 0x02
+    int     0x21
+    inc     cx
+    jmp     .pwn_pad
+.pwn_next:
+    pop     cx
+    call    .wide_next_col
+    ret
+
+.print_wide_dir:
+    ; Print dir name (max 12 chars for [ ])
+    push    cx
+    xor     cx, cx
+.pwd_loop:
+    lodsb
+    test    al, al
+    jz      .pwd_done
+    cmp     cx, 12
+    jae     .pwd_done
+    mov     dl, al
+    mov     ah, 0x02
+    int     0x21
+    inc     cx
+    jmp     .pwd_loop
+.pwd_done:
+    pop     cx
+    ret
+
+.wide_next_col:
+    inc     byte [dir_col_count]
+    cmp     byte [dir_col_count], 5
+    jb      .wnc_done
+    mov     byte [dir_col_count], 0
+    call    print_crlf
+    call    .check_pause
+.wnc_done:
+    ret
+
+.check_pause:
+    cmp     byte [dir_opt_pause], 0
+    je      .cp_done
+    inc     byte [dir_line_count]
+    cmp     byte [dir_line_count], 23
+    jb      .cp_done
+    mov     byte [dir_line_count], 0
+    ; Print "Press any key..." and wait
+    mov     dx, dir_pause_msg
+    mov     ah, 0x09
+    int     0x21
+    xor     ah, ah
+    int     0x16
+    ; Clear the line
+    mov     dl, 0x0D
+    mov     ah, 0x02
+    int     0x21
+    mov     cx, 25
+.cp_clear:
+    mov     dl, ' '
+    int     0x21
+    loop    .cp_clear
+    mov     dl, 0x0D
+    int     0x21
+.cp_done:
+    ret
+
 ; DIR data
 dir_header      db  ' Volume in drive A is CLAUDEDOS', 0x0D, 0x0A
                 db  ' Directory of A:\', 0x0D, 0x0A, 0x0D, 0x0A, '$'
 dir_all_spec    db  '*.*', 0
 dir_dir_tag     db  '<DIR>$'
+dir_files_msg   db  ' file(s)  $'
+dir_bytes_msg   db  ' bytes', 0x0D, 0x0A, '$'
+dir_pause_msg   db  'Press any key to continue...$'
+
 dir_dta         times 43 db 0
+dir_filespec    dw  0
+dir_opt_pause   db  0
+dir_opt_wide    db  0
+dir_file_count  dw  0
+dir_dir_count   dw  0
+dir_total_size  dd  0
+dir_line_count  db  0
+dir_col_count   db  0
