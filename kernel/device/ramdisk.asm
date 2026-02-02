@@ -258,7 +258,7 @@ ramdisk_format:
 
 ; ---------------------------------------------------------------------------
 ; ramdisk_read - Read sectors from RAM disk to transfer buffer
-; Request packet: [bx+14]=count, [bx+18]=start sector, [bx+20]=xfer addr
+; Request packet: [bx+14]=xfer addr (dword), [bx+18]=sector count, [bx+20]=start sector
 ; ---------------------------------------------------------------------------
 ramdisk_read:
     push    ds
@@ -316,7 +316,7 @@ ramdisk_read:
 
 ; ---------------------------------------------------------------------------
 ; ramdisk_write - Write sectors to RAM disk from transfer buffer
-; Request packet: [bx+14]=count, [bx+18]=start sector, [bx+20]=xfer addr
+; Request packet: [bx+14]=xfer addr (dword), [bx+18]=sector count, [bx+20]=start sector
 ; ---------------------------------------------------------------------------
 ramdisk_write:
     push    ds
