@@ -185,6 +185,17 @@ handle_to_sft:
 ; AH=3Ch - Create file
 ; Input: DS:DX = ASCIIZ filename, CX = attribute
 int21_3C:
+    mov     byte [cs:create_exclusive], 0   ; Normal create - truncate if exists
+    jmp     short int21_3C_common
+
+; AH=5Bh - Create new file (exclusive - fail if exists)
+; Input: DS:DX = ASCIIZ filename, CX = attribute
+; Output: CF clear, AX = handle on success
+;         CF set, AX = error code on failure
+int21_5B_impl:
+    mov     byte [cs:create_exclusive], 1   ; Exclusive create - fail if exists
+
+int21_3C_common:
     push    es
     push    si
     push    di
@@ -368,6 +379,20 @@ int21_3C:
     jmp     .cr_open_file
 
 .cr_truncate:
+    ; Check if exclusive create - if so, fail because file exists
+    cmp     byte [cs:create_exclusive], 1
+    jne     .cr_truncate_ok
+    ; Exclusive create and file exists - return error
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_FILE_EXISTS
+    jmp     dos_set_error
+
+.cr_truncate_ok:
     ; File exists at DI, sector in AX
     ; Save location
     mov     [search_dir_sector], ax
@@ -817,6 +842,11 @@ int21_3F:
     ; DI = SFT entry pointer
     mov     bp, di                  ; BP = SFT entry pointer
 
+    ; Validate read permission: check open mode
+    mov     ax, [cs:bp + SFT_ENTRY.open_mode]
+    cmp     al, OPEN_WRITE
+    je      .read_access_denied     ; Opened write-only
+
     ; Calculate remaining bytes = file_size - file_pos (32-bit)
     ; NOTE: BP-relative addressing defaults to SS segment, but SFT is in CS
     ; Must use cs: segment override for all [bp + ...] accesses
@@ -964,6 +994,14 @@ int21_3F:
     mov     ax, ERR_READ_FAULT
     jmp     dos_set_error
 
+.read_access_denied:
+    pop     bp
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_ACCESS_DENIED
+    jmp     dos_set_error
+
 .read_bad_handle:
     pop     bp
     pop     di
@@ -1033,6 +1071,15 @@ int21_40:
     ; DI = SFT entry pointer
     mov     bp, di                  ; BP = SFT entry pointer
 
+    ; Validate write permission: check open mode
+    mov     ax, [cs:bp + SFT_ENTRY.open_mode]
+    cmp     al, OPEN_READ
+    je      .write_access_denied    ; Opened read-only
+
+    ; Validate file attribute: check not read-only
+    test    byte [cs:bp + SFT_ENTRY.attr], ATTR_READ_ONLY
+    jnz     .write_access_denied    ; File is read-only
+
     mov     cx, [save_cx]           ; Bytes to write
     test    cx, cx
     jz      .write_zero
@@ -1055,10 +1102,14 @@ int21_40:
     ; Check if we need to allocate a new cluster
     push    ax                      ; Save offset
     mov     ax, [cs:bp + SFT_ENTRY.cur_cluster]
+    ; Valid data clusters are 2 to max_cluster-1
+    ; 0 and 1 are reserved (no cluster allocated yet)
+    ; >= 0xFF8 (FAT12) or 0xFFF8 (FAT16) means end of chain
+    cmp     ax, 2
+    jb      .write_need_cluster     ; Clusters 0,1 = need to allocate
     cmp     ax, 0x0FF8
-    jb      .write_have_cluster
-    cmp     ax, 0                   ; No cluster yet (empty file)?
-    jne     .write_need_cluster
+    jb      .write_have_cluster     ; Valid cluster in range
+    ; Fall through to allocate (end of chain or invalid)
 
 .write_need_cluster:
     ; Allocate a new cluster
@@ -1077,6 +1128,10 @@ int21_40:
     push    ax                      ; New cluster
     mov     bx, ax
     mov     ax, [cs:bp + SFT_ENTRY.cur_cluster]
+    ; Check if this is the first cluster for this file
+    ; Clusters 0 and 1 are reserved, so if cur_cluster < 2, it's a new file
+    cmp     ax, 2
+    jb      .write_first_cluster
     cmp     ax, 0x0FF8
     jae     .write_first_cluster
     ; Not first - link previous cluster to new one
@@ -1162,6 +1217,8 @@ int21_40:
     pop     cx
 
     ; Write sector back to disk
+    ; BX = bytes copied this iteration, must preserve it!
+    push    bx                      ; Save byte count
     push    cx
     push    dx
     push    si
@@ -1179,6 +1236,7 @@ int21_40:
     pop     si
     pop     dx
     pop     cx
+    pop     bx                      ; Restore byte count
     jc      .write_error
 
     ; Advance file_pos by bx bytes
@@ -1264,6 +1322,14 @@ int21_40:
     pop     si
     pop     es
     mov     ax, ERR_WRITE_FAULT
+    jmp     dos_set_error
+
+.write_access_denied:
+    pop     bp
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_ACCESS_DENIED
     jmp     dos_set_error
 
 .write_bad_handle:
@@ -2113,23 +2179,633 @@ int21_56:
 .ren_new_name       times 11 db 0
 
 ; AH=57h - Get/Set file date/time
+; Input: AL = 0 (get) or 1 (set)
+;        BX = file handle
+;        CX = time (if AL=1)
+;        DX = date (if AL=1)
+; Output: CX = time, DX = date (if AL=0)
+;         CF set on error
 int21_57:
-    mov     word [save_cx], 0    ; Time = 0
-    mov     word [save_dx], 0    ; Date = 0
+    push    es
+    push    di
+    push    si
+    push    bp
+
+    ; Get file handle from saved BX
+    mov     bx, [save_bx]
+    call    handle_to_sft
+    jc      .dt_bad_handle
+
+    mov     bp, di                  ; BP = SFT entry pointer
+
+    ; Check subfunction in saved AL
+    mov     al, [save_ax]           ; Get AL (subfunction)
+    test    al, al
+    jz      .dt_get
+    cmp     al, 1
+    je      .dt_set
+    ; Unknown subfunction
+    jmp     .dt_invalid
+
+.dt_get:
+    ; AL=0: Get file date/time from SFT
+    mov     ax, [cs:bp + SFT_ENTRY.time]
+    mov     [save_cx], ax           ; Return time in CX
+    mov     ax, [cs:bp + SFT_ENTRY.date]
+    mov     [save_dx], ax           ; Return date in DX
+    jmp     .dt_success
+
+.dt_set:
+    ; AL=1: Set file date/time
+    ; Update SFT entry
+    mov     ax, [save_cx]
+    mov     [cs:bp + SFT_ENTRY.time], ax
+    mov     ax, [save_dx]
+    mov     [cs:bp + SFT_ENTRY.date], ax
+
+    ; Also update directory entry on disk
+    ; Read the directory sector
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [cs:bp + SFT_ENTRY.dir_sector]
+    call    fat_read_sector
+    jc      .dt_read_error
+
+    ; Calculate offset to directory entry
+    xor     ah, ah
+    mov     al, [cs:bp + SFT_ENTRY.dir_index]
+    mov     cl, 5
+    shl     ax, cl                  ; AX = index * 32
+    mov     di, disk_buffer
+    add     di, ax                  ; DI = directory entry
+
+    ; Update time (offset 22) and date (offset 24)
+    mov     ax, [save_cx]
+    mov     [di + 22], ax           ; Write time
+    mov     ax, [save_dx]
+    mov     [di + 24], ax           ; Write date
+
+    ; Write directory sector back
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [cs:bp + SFT_ENTRY.dir_sector]
+    call    fat_write_sector
+    jc      .dt_write_error
+
+.dt_success:
+    pop     bp
+    pop     si
+    pop     di
+    pop     es
     call    dos_clear_error
     ret
 
-; AH=5Bh - Create new file
-int21_5B:
-    mov     ax, ERR_ACCESS_DENIED
+.dt_bad_handle:
+    pop     bp
+    pop     si
+    pop     di
+    pop     es
+    mov     ax, ERR_INVALID_HANDLE
     jmp     dos_set_error
 
-; AH=6Ch - Extended open/create
-int21_6C:
+.dt_invalid:
+    pop     bp
+    pop     si
+    pop     di
+    pop     es
     mov     ax, ERR_INVALID_FUNC
     jmp     dos_set_error
+
+.dt_read_error:
+.dt_write_error:
+    pop     bp
+    pop     si
+    pop     di
+    pop     es
+    mov     ax, ERR_READ_FAULT
+    jmp     dos_set_error
+
+; AH=5Bh - Create new file (exclusive)
+; Implemented above as int21_5B_impl
+int21_5B:
+    jmp     int21_5B_impl
+
+; AH=6Ch - Extended open/create
+; AH=6Ch - Extended open/create
+; Input: AL = open mode (access mode)
+;        BL = action flags:
+;            Bits 0-3: if file exists (0=fail, 1=open, 2=replace/truncate)
+;            Bits 4-7: if file doesn't exist (0=fail, 1=create)
+;        CX = file attributes (if creating)
+;        DS:DX = ASCIIZ filename
+; Output: AX = handle
+;         CX = action taken (1=opened, 2=created, 3=replaced)
+;         CF set on error
+int21_6C:
+    push    es
+    push    si
+    push    di
+    push    bx
+    push    dx
+    push    bp
+
+    ; Save action flags from BL (save_bx low byte)
+    mov     ax, [save_bx]
+    mov     [.ext_action], al           ; Save action flags
+
+    ; Copy filename from caller's DS:DX to path_buffer
+    push    ds
+    mov     ds, [cs:save_ds]
+    mov     si, [cs:save_dx]
+    push    cs
+    pop     es
+    mov     di, path_buffer
+    mov     cx, 127
+.ext_copy:
+    lodsb
+    stosb
+    test    al, al
+    jz      .ext_copied
+    loop    .ext_copy
+    mov     byte [es:di], 0
+.ext_copied:
+    pop     ds
+
+    ; Resolve path to get directory cluster and filename
+    mov     si, path_buffer
+    call    resolve_path
+    jc      .ext_path_not_found
+
+    ; AX = directory cluster, fcb_name_buffer = filename
+    mov     [.ext_dir_cluster], ax
+
+    ; Search directory for the file
+    mov     si, fcb_name_buffer
+    call    fat_find_in_directory
+    jc      .ext_not_found
+
+    ; File EXISTS - check action flags bits 0-3
+    mov     al, [.ext_action]
+    and     al, 0x0F                    ; Bits 0-3: action if exists
+    jz      .ext_exists_fail            ; 0 = fail
+    cmp     al, 1
+    je      .ext_exists_open            ; 1 = open
+    cmp     al, 2
+    je      .ext_exists_replace         ; 2 = replace/truncate
+    jmp     .ext_exists_fail            ; Unknown = fail
+
+.ext_exists_open:
+    ; Open existing file (same as 3Dh open path)
+    ; DI = dir entry, AX = sector
+    mov     [search_dir_sector], ax
+    push    ax
+    mov     ax, di
+    sub     ax, disk_buffer
+    shr     ax, 5
+    mov     [search_dir_index], ax
+    pop     ax
+
+    ; Save dir entry fields
+    push    word [di + 26]              ; Starting cluster
+    push    word [di + 28]              ; File size low
+    push    word [di + 30]              ; File size high
+    push    word [di + 22]              ; Time
+    push    word [di + 24]              ; Date
+    push    word [di + 11]              ; Attribute
+
+    ; Allocate SFT entry
+    call    sft_alloc
+    jc      .ext_too_many_pop6
+
+    mov     bx, ax                      ; Save SFT index
+
+    ; Fill SFT entry
+    pop     ax
+    mov     [di + SFT_ENTRY.attr], al
+    pop     ax
+    mov     [di + SFT_ENTRY.date], ax
+    pop     ax
+    mov     [di + SFT_ENTRY.time], ax
+    pop     ax
+    mov     word [di + SFT_ENTRY.file_size + 2], ax
+    pop     ax
+    mov     word [di + SFT_ENTRY.file_size], ax
+    pop     ax
+    mov     [di + SFT_ENTRY.first_cluster], ax
+    mov     [di + SFT_ENTRY.cur_cluster], ax
+
+    mov     word [di + SFT_ENTRY.file_pos], 0
+    mov     word [di + SFT_ENTRY.file_pos + 2], 0
+    mov     word [di + SFT_ENTRY.rel_cluster], 0
+
+    mov     ax, [save_ax]
+    and     ax, 0x00FF
+    mov     [di + SFT_ENTRY.open_mode], ax
+
+    mov     ax, [search_dir_sector]
+    mov     [di + SFT_ENTRY.dir_sector], ax
+    mov     ax, [search_dir_index]
+    mov     [di + SFT_ENTRY.dir_index], al
+
+    ; Copy FCB name
+    push    di
+    mov     si, fcb_name_buffer
+    add     di, SFT_ENTRY.name
+    mov     cx, 11
+    rep     movsb
+    pop     di
+
+    ; Allocate handle
+    mov     cl, bl
+    call    handle_alloc
+    jc      .ext_too_many_dealloc
+
+    mov     [save_ax], ax               ; Return handle
+    mov     word [save_cx], 1           ; Action = opened existing
+    jmp     .ext_success
+
+.ext_exists_replace:
+    ; Replace/truncate existing file - first free its clusters
+    mov     [search_dir_sector], ax
+    push    ax
+    mov     ax, di
+    sub     ax, disk_buffer
+    shr     ax, 5
+    mov     [search_dir_index], ax
+    pop     ax
+
+    ; Free existing cluster chain if any
+    mov     ax, [di + 26]               ; First cluster
+    test    ax, ax
+    jz      .ext_replace_no_chain
+    cmp     ax, 2
+    jb      .ext_replace_no_chain
+    call    fat_free_chain
+
+.ext_replace_no_chain:
+    ; Reset file to empty
+    xor     ax, ax
+    mov     [di + 26], ax               ; First cluster = 0
+    mov     [di + 28], ax               ; Size low = 0
+    mov     [di + 30], ax               ; Size high = 0
+
+    ; Write directory sector back
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [search_dir_sector]
+    call    fat_write_sector
+    jc      .ext_write_error
+
+    ; Now open the truncated file
+    mov     ax, [search_dir_sector]
+    call    fat_read_sector             ; Re-read the sector
+    jc      .ext_read_error
+
+    ; Find entry again
+    mov     ax, [search_dir_index]
+    shl     ax, 5
+    mov     di, disk_buffer
+    add     di, ax
+
+    ; Save fields and allocate SFT
+    push    word [di + 26]              ; Starting cluster
+    push    word [di + 28]              ; File size low
+    push    word [di + 30]              ; File size high
+    push    word [di + 22]              ; Time
+    push    word [di + 24]              ; Date
+    push    word [di + 11]              ; Attribute
+
+    call    sft_alloc
+    jc      .ext_too_many_pop6
+
+    mov     bx, ax
+
+    pop     ax
+    mov     [di + SFT_ENTRY.attr], al
+    pop     ax
+    mov     [di + SFT_ENTRY.date], ax
+    pop     ax
+    mov     [di + SFT_ENTRY.time], ax
+    pop     ax
+    mov     word [di + SFT_ENTRY.file_size + 2], ax
+    pop     ax
+    mov     word [di + SFT_ENTRY.file_size], ax
+    pop     ax
+    mov     [di + SFT_ENTRY.first_cluster], ax
+    mov     [di + SFT_ENTRY.cur_cluster], ax
+
+    mov     word [di + SFT_ENTRY.file_pos], 0
+    mov     word [di + SFT_ENTRY.file_pos + 2], 0
+    mov     word [di + SFT_ENTRY.rel_cluster], 0
+
+    mov     ax, [save_ax]
+    and     ax, 0x00FF
+    mov     [di + SFT_ENTRY.open_mode], ax
+
+    mov     ax, [search_dir_sector]
+    mov     [di + SFT_ENTRY.dir_sector], ax
+    mov     ax, [search_dir_index]
+    mov     [di + SFT_ENTRY.dir_index], al
+
+    push    di
+    mov     si, fcb_name_buffer
+    add     di, SFT_ENTRY.name
+    mov     cx, 11
+    rep     movsb
+    pop     di
+
+    mov     cl, bl
+    call    handle_alloc
+    jc      .ext_too_many_dealloc
+
+    mov     [save_ax], ax               ; Return handle
+    mov     word [save_cx], 3           ; Action = replaced/truncated
+    jmp     .ext_success
+
+.ext_not_found:
+    ; File does NOT exist - check action flags bits 4-7
+    mov     al, [.ext_action]
+    shr     al, 4                       ; Bits 4-7: action if not exists
+    jz      .ext_not_found_fail         ; 0 = fail
+    cmp     al, 1
+    je      .ext_not_found_create       ; 1 = create
+    jmp     .ext_not_found_fail         ; Unknown = fail
+
+.ext_not_found_create:
+    ; Create new file - use 3Ch create logic
+    ; Set up for create: save_cx has attributes
+    mov     byte [cs:create_exclusive], 0
+    mov     ax, [.ext_dir_cluster]
+    mov     [create_dir_cluster], ax
+
+    ; Need to find empty slot and create entry
+    ; Jump into the create code path after setup
+    ; This is complex - for simplicity, call the create function indirectly
+    ; by setting up state and using common create logic
+
+    ; Find empty directory slot
+    mov     ax, [.ext_dir_cluster]
+    test    ax, ax
+    jnz     .ext_create_subdir
+
+    ; Root directory scan
+    mov     ax, 19
+    mov     cx, 14
+.ext_scan_root:
+    push    cx
+    push    ax
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    jc      .ext_read_error_pop2
+
+    mov     di, disk_buffer
+    xor     cx, cx
+.ext_scan_root_entry:
+    cmp     cx, 16
+    jae     .ext_next_root_sector
+    cmp     byte [di], 0x00
+    je      .ext_found_slot
+    cmp     byte [di], 0xE5
+    je      .ext_found_slot
+    add     di, 32
+    inc     cx
+    jmp     .ext_scan_root_entry
+
+.ext_next_root_sector:
+    pop     ax
+    pop     cx
+    inc     ax
+    loop    .ext_scan_root
+    jmp     .ext_dir_full
+
+.ext_found_slot:
+    pop     ax
+    mov     [search_dir_sector], ax
+    mov     [search_dir_index], cx
+    pop     cx
+    jmp     .ext_init_entry
+
+.ext_create_subdir:
+    mov     dx, ax
+.ext_subdir_loop:
+    mov     ax, dx
+    call    fat_cluster_to_lba
+    push    dx
+    push    ax
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    pop     ax
+    pop     dx
+    jc      .ext_read_error
+
+    mov     di, disk_buffer
+    xor     cx, cx
+.ext_subdir_entry:
+    cmp     cx, 16
+    jae     .ext_subdir_next
+    cmp     byte [di], 0x00
+    je      .ext_found_subdir_slot
+    cmp     byte [di], 0xE5
+    je      .ext_found_subdir_slot
+    add     di, 32
+    inc     cx
+    jmp     .ext_subdir_entry
+
+.ext_subdir_next:
+    mov     ax, dx
+    call    fat_get_next_cluster
+    mov     dx, ax
+    cmp     dx, 0x0FF8
+    jb      .ext_subdir_loop
+    jmp     .ext_dir_full
+
+.ext_found_subdir_slot:
+    mov     ax, dx
+    call    fat_cluster_to_lba
+    mov     [search_dir_sector], ax
+    mov     [search_dir_index], cx
+
+.ext_init_entry:
+    ; Initialize directory entry
+    push    di
+    mov     si, fcb_name_buffer
+    mov     cx, 11
+    rep     movsb
+    pop     di
+
+    ; Set attribute from saved CX
+    mov     ax, [save_cx]
+    mov     [di + 11], al
+
+    ; Zero out other fields
+    xor     ax, ax
+    mov     [di + 12], ax
+    mov     [di + 14], ax
+    mov     [di + 16], ax
+    mov     [di + 18], ax
+    mov     [di + 20], ax
+    mov     [di + 22], ax
+    mov     [di + 24], ax
+    mov     [di + 26], ax
+    mov     [di + 28], ax
+    mov     [di + 30], ax
+
+    ; Write directory sector
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [search_dir_sector]
+    call    fat_write_sector
+    jc      .ext_write_error
+
+    ; Now open the newly created file
+    push    word [di + 26]
+    push    word [di + 28]
+    push    word [di + 30]
+    push    word [di + 22]
+    push    word [di + 24]
+    push    word [di + 11]
+
+    call    sft_alloc
+    jc      .ext_too_many_pop6
+
+    mov     bx, ax
+
+    pop     ax
+    mov     [di + SFT_ENTRY.attr], al
+    pop     ax
+    mov     [di + SFT_ENTRY.date], ax
+    pop     ax
+    mov     [di + SFT_ENTRY.time], ax
+    pop     ax
+    mov     word [di + SFT_ENTRY.file_size + 2], ax
+    pop     ax
+    mov     word [di + SFT_ENTRY.file_size], ax
+    pop     ax
+    mov     [di + SFT_ENTRY.first_cluster], ax
+    mov     [di + SFT_ENTRY.cur_cluster], ax
+
+    mov     word [di + SFT_ENTRY.file_pos], 0
+    mov     word [di + SFT_ENTRY.file_pos + 2], 0
+    mov     word [di + SFT_ENTRY.rel_cluster], 0
+
+    mov     ax, [save_ax]
+    and     ax, 0x00FF
+    mov     [di + SFT_ENTRY.open_mode], ax
+
+    mov     ax, [search_dir_sector]
+    mov     [di + SFT_ENTRY.dir_sector], ax
+    mov     ax, [search_dir_index]
+    mov     [di + SFT_ENTRY.dir_index], al
+
+    push    di
+    mov     si, fcb_name_buffer
+    add     di, SFT_ENTRY.name
+    mov     cx, 11
+    rep     movsb
+    pop     di
+
+    mov     cl, bl
+    call    handle_alloc
+    jc      .ext_too_many_dealloc
+
+    mov     [save_ax], ax               ; Return handle
+    mov     word [save_cx], 2           ; Action = created new
+    jmp     .ext_success
+
+.ext_success:
+    pop     bp
+    pop     dx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    call    dos_clear_error
+    ret
+
+.ext_too_many_dealloc:
+    mov     ax, bx
+    call    sft_dealloc
+    jmp     .ext_too_many
+
+.ext_too_many_pop6:
+    add     sp, 12
+.ext_too_many:
+    pop     bp
+    pop     dx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_TOO_MANY_FILES
+    jmp     dos_set_error
+
+.ext_read_error_pop2:
+    add     sp, 4
+.ext_read_error:
+    pop     bp
+    pop     dx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_READ_FAULT
+    jmp     dos_set_error
+
+.ext_write_error:
+    pop     bp
+    pop     dx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_WRITE_FAULT
+    jmp     dos_set_error
+
+.ext_exists_fail:
+    pop     bp
+    pop     dx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_FILE_EXISTS
+    jmp     dos_set_error
+
+.ext_not_found_fail:
+.ext_path_not_found:
+    pop     bp
+    pop     dx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_FILE_NOT_FOUND
+    jmp     dos_set_error
+
+.ext_dir_full:
+    pop     bp
+    pop     dx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_CANNOT_MAKE
+    jmp     dos_set_error
+
+; Local data for extended open
+.ext_action     db  0
+.ext_dir_cluster dw 0
 
 ; ---------------------------------------------------------------------------
 ; File I/O local data
 ; ---------------------------------------------------------------------------
 create_dir_cluster  dw  0           ; Target directory cluster for file creation
+create_exclusive    db  0           ; 1 if exclusive create (5Bh), 0 for normal (3Ch)

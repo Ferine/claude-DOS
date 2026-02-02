@@ -431,10 +431,302 @@ int21_14:
 ; int21_15 - FCB Sequential write
 ; Input: DS:DX = FCB pointer
 ; Output: AL = 00h if successful, 01h if disk full, 02h if error
+; Writes one record from DTA, advances current record
 ; ---------------------------------------------------------------------------
 int21_15:
-    mov     byte [save_ax], 0xFF    ; Not implemented
+    push    es
+    push    si
+    push    di
+    push    bx
+    push    cx
+    push    dx
+    push    bp
+
+    ; Get FCB pointer
+    mov     es, [save_ds]
+    mov     bp, [save_dx]           ; ES:BP = FCB
+
+    ; Calculate file offset: (cur_block * 128 + cur_rec) * rec_size
+    mov     ax, [es:bp + FCB_CUR_BLOCK]
+    mov     cl, 7
+    shl     ax, cl                  ; AX = cur_block * 128
+    xor     bh, bh
+    mov     bl, [es:bp + FCB_CUR_REC]
+    add     ax, bx                  ; AX = record number
+
+    ; File offset = record_number * record_size
+    mov     bx, [es:bp + FCB_REC_SIZE]
+    mul     bx                      ; DX:AX = file offset
+
+    ; Save file offset
+    mov     [.wr15_offset], ax
+    mov     [.wr15_offset + 2], dx
+
+    ; Calculate which cluster we need (sector index = file_offset / 512)
+    mov     ax, [.wr15_offset + 2]
+    mov     dx, [.wr15_offset]
+    mov     cx, 9
+.shift_15:
+    shr     ax, 1
+    rcr     dx, 1
+    loop    .shift_15
+    mov     [.wr15_cluster_idx], dx ; Sector/cluster index
+
+    ; Get first cluster from FCB
+    mov     ax, [es:bp + FCB_RESERVED]
+
+    ; If file has no clusters yet, allocate first one
+    test    ax, ax
+    jnz     .have_cluster_15
+    call    fat_alloc_cluster
+    jc      .disk_full_15
+    ; AX = new cluster, mark it as end of chain
+    push    ax
+    mov     dx, 0x0FFF              ; End of chain marker
+    call    fat_set_cluster
+    pop     ax
+    ; Store in FCB and directory entry
+    mov     [es:bp + FCB_RESERVED], ax
+    ; Also need to update directory entry
+    push    ax
+    push    es
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    push    ax
+    mov     ax, [cs:save_ds]
+    mov     es, ax
+    mov     ax, [es:bp + FCB_RESERVED + 2]  ; Dir sector
+    push    cs
+    pop     es
+    call    fat_read_sector
+    pop     ax
+    pop     es
+    jc      .error_15
+
+    ; Update first cluster in directory entry
+    push    es
+    mov     es, [save_ds]
+    mov     di, [es:bp + FCB_RESERVED + 4]  ; Dir index
+    push    cs
+    pop     es
+    shl     di, 5                   ; * 32
+    add     di, disk_buffer
+    pop     ax                      ; First cluster
+    mov     [di + 26], ax
+
+    ; Write directory back
+    push    cs
+    pop     es
+    push    ax
+    mov     ax, [save_ds]
+    push    ax
+    mov     es, ax
+    mov     ax, [es:bp + FCB_RESERVED + 2]
+    pop     ax
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_write_sector
+    pop     ax
+    jc      .error_15
+    jmp     .have_cluster_15
+
+.have_cluster_15:
+    ; Walk cluster chain to find target cluster
+    mov     cx, [.wr15_cluster_idx]
+    test    cx, cx
+    jz      .at_cluster_15
+
+.walk_chain_15:
+    push    cx
+    push    ax
+    call    fat_get_next_cluster
+    cmp     ax, 0x0FF8
+    jae     .need_extend_15
+    mov     bx, ax
+    pop     ax
+    mov     ax, bx
+    pop     cx
+    dec     cx
+    jnz     .walk_chain_15
+    jmp     .at_cluster_15
+
+.need_extend_15:
+    ; Need to extend file - allocate new cluster
+    pop     ax                      ; Previous cluster
+    pop     cx                      ; Remaining count
+    push    ax                      ; Save prev cluster
+    call    fat_alloc_cluster
+    jc      .disk_full_15_pop
+    mov     bx, ax                  ; BX = new cluster
+    ; Link prev cluster to new cluster
+    pop     ax                      ; AX = prev cluster
+    push    bx                      ; Save new cluster
+    mov     dx, bx                  ; DX = new cluster
+    call    fat_set_cluster         ; Link prev -> new
+    pop     ax                      ; AX = new cluster
+    ; Mark new as end of chain
+    push    ax
+    mov     dx, 0x0FFF
+    call    fat_set_cluster
+    pop     ax
+    dec     cx
+    jnz     .walk_chain_15
+
+.at_cluster_15:
+    ; AX = cluster to write to
+    mov     [.wr15_cur_cluster], ax
+
+    ; Read the sector
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_cluster_to_lba
+    push    ax                      ; Save LBA
+    call    fat_read_sector
+    pop     ax                      ; Restore LBA
+    jc      .error_15
+
+    ; Calculate offset within sector
+    mov     bx, [.wr15_offset]
+    and     bx, 0x01FF              ; offset mod 512
+
+    ; Copy record from DTA to disk_buffer
+    mov     es, [save_ds]
+    mov     cx, [es:bp + FCB_REC_SIZE]
+    mov     si, [current_dta_off]
+    push    ds
+    mov     ds, [current_dta_seg]   ; DS:SI = DTA
+    push    cs
+    pop     es
+    mov     di, disk_buffer
+    add     di, bx                  ; ES:DI = disk_buffer + offset
+    rep     movsb
+    pop     ds
+
+    ; Write sector back
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    ; AX still has LBA
+    mov     ax, [.wr15_cur_cluster]
+    call    fat_cluster_to_lba
+    call    fat_write_sector
+    jc      .error_15
+
+    ; Update file size if we wrote past current end
+    mov     ax, [.wr15_offset]
+    mov     dx, [.wr15_offset + 2]
+    mov     es, [save_ds]
+    mov     cx, [es:bp + FCB_REC_SIZE]
+    add     ax, cx
+    adc     dx, 0                   ; DX:AX = new end position
+
+    ; Compare with current file size
+    cmp     dx, [es:bp + FCB_FILE_SIZE + 2]
+    jb      .no_size_update_15
+    ja      .update_size_15
+    cmp     ax, [es:bp + FCB_FILE_SIZE]
+    jbe     .no_size_update_15
+
+.update_size_15:
+    ; Update FCB file size
+    mov     [es:bp + FCB_FILE_SIZE], ax
+    mov     [es:bp + FCB_FILE_SIZE + 2], dx
+
+    ; Also update directory entry
+    push    ax
+    push    dx
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    push    ax
+    mov     ax, [save_ds]
+    mov     es, ax
+    mov     ax, [es:bp + FCB_RESERVED + 2]  ; Dir sector
+    push    cs
+    pop     es
+    call    fat_read_sector
+    pop     ax
+    jc      .error_15_pop2
+
+    mov     es, [save_ds]
+    mov     di, [es:bp + FCB_RESERVED + 4]  ; Dir index
+    push    cs
+    pop     es
+    shl     di, 5
+    add     di, disk_buffer
+    pop     dx
+    pop     ax
+    mov     [di + 28], ax           ; Size low
+    mov     [di + 30], dx           ; Size high
+    ; Also update first cluster if needed
+    mov     es, [save_ds]
+    mov     ax, [es:bp + FCB_RESERVED]
+    push    cs
+    pop     es
+    mov     [di + 26], ax
+
+    ; Write directory back
+    mov     bx, disk_buffer
+    mov     es, [save_ds]
+    mov     ax, [es:bp + FCB_RESERVED + 2]
+    push    cs
+    pop     es
+    call    fat_write_sector
+    jc      .error_15
+
+.no_size_update_15:
+    ; Advance FCB record position
+    mov     es, [save_ds]
+    inc     byte [es:bp + FCB_CUR_REC]
+    cmp     byte [es:bp + FCB_CUR_REC], 128
+    jb      .done_15
+    mov     byte [es:bp + FCB_CUR_REC], 0
+    inc     word [es:bp + FCB_CUR_BLOCK]
+
+.done_15:
+    mov     byte [save_ax], 0       ; Success
+    pop     bp
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
     ret
+
+.error_15_pop2:
+    add     sp, 4
+.error_15:
+    mov     byte [save_ax], 2       ; Error
+    pop     bp
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    ret
+
+.disk_full_15_pop:
+    add     sp, 4
+.disk_full_15:
+    mov     byte [save_ax], 1       ; Disk full
+    pop     bp
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    ret
+
+; Local data for FCB Sequential Write
+.wr15_offset        dd  0
+.wr15_cluster_idx   dw  0
+.wr15_cur_cluster   dw  0
 
 ; ---------------------------------------------------------------------------
 ; int21_16 - FCB Create file
@@ -442,8 +734,199 @@ int21_15:
 ; Output: AL = 00h if successful, FFh if error
 ; ---------------------------------------------------------------------------
 int21_16:
-    mov     byte [save_ax], 0xFF    ; Not implemented
+    push    es
+    push    si
+    push    di
+    push    bx
+    push    cx
+    push    dx
+
+    ; Get FCB pointer from caller's DS:DX
+    mov     es, [save_ds]
+    mov     di, [save_dx]           ; ES:DI = FCB
+
+    ; Copy FCB filename (bytes 1-11) to fcb_name_buffer
+    push    di
+    add     di, FCB_FILENAME
+    mov     si, fcb_name_buffer
+    mov     cx, 11
+.copy_name_16:
+    mov     al, [es:di]
+    mov     [si], al
+    inc     di
+    inc     si
+    loop    .copy_name_16
+    pop     di
+
+    ; Search root directory for existing file
+    mov     si, fcb_name_buffer
+    call    fat_find_in_root
+    jc      .create_new_16
+
+    ; File exists - truncate it (free cluster chain, reset size)
+    mov     [.cr16_dir_sector], ax
+    push    di                      ; Save FCB pointer
+    mov     bx, di
+    mov     di, disk_buffer
+    push    ax
+    mov     ax, bx
+    sub     ax, disk_buffer         ; Hmm, DI is in ES segment...
+
+    ; Actually, dir entry is in disk_buffer (kernel segment)
+    ; search_dir_sector and search_dir_index were set by fat_find_in_root
+    ; Let me recalculate - DI from fat_find_in_root points into disk_buffer
+    pop     ax                      ; Restore sector
+    ; DI should still point to the directory entry in disk_buffer
+
+    ; Free existing cluster chain if any
+    mov     ax, [di + 26]           ; First cluster
+    test    ax, ax
+    jz      .no_chain_16
+    cmp     ax, 2
+    jb      .no_chain_16
+    call    fat_free_chain
+
+.no_chain_16:
+    ; Reset entry to empty file
+    xor     ax, ax
+    mov     [di + 26], ax           ; First cluster = 0
+    mov     [di + 28], ax           ; Size low = 0
+    mov     [di + 30], ax           ; Size high = 0
+
+    ; Write directory sector back
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.cr16_dir_sector]
+    call    fat_write_sector
+    pop     di                      ; Restore FCB pointer
+    mov     es, [save_ds]           ; Restore ES to caller's segment
+    jc      .error_16
+    jmp     .init_fcb_16
+
+.create_new_16:
+    ; File doesn't exist - find empty slot in root directory
+    mov     ax, 19                  ; Root dir start
+    mov     cx, 14                  ; Root dir sectors
+
+.scan_root_16:
+    push    cx
+    push    ax
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    jc      .read_error_16
+
+    ; Search 16 entries per sector
+    mov     di, disk_buffer
+    xor     cx, cx
+
+.scan_entry_16:
+    cmp     cx, 16
+    jae     .next_sector_16
+    cmp     byte [di], 0x00         ; Empty
+    je      .found_slot_16
+    cmp     byte [di], 0xE5         ; Deleted
+    je      .found_slot_16
+    add     di, 32
+    inc     cx
+    jmp     .scan_entry_16
+
+.next_sector_16:
+    pop     ax
+    pop     cx
+    inc     ax
+    loop    .scan_root_16
+    jmp     .dir_full_16
+
+.found_slot_16:
+    pop     ax                      ; Sector number
+    mov     [.cr16_dir_sector], ax
+    mov     [.cr16_dir_index], cx
+    pop     cx                      ; Clean up outer CX
+
+    ; Initialize directory entry
+    ; Copy FCB name
+    push    di
+    mov     si, fcb_name_buffer
+    mov     cx, 11
+    rep     movsb
+    pop     di
+
+    ; Set attribute = 0 (normal file)
+    xor     ax, ax
+    mov     [di + 11], al
+
+    ; Zero out all other fields
+    mov     [di + 12], ax
+    mov     [di + 14], ax
+    mov     [di + 16], ax
+    mov     [di + 18], ax
+    mov     [di + 20], ax
+    mov     [di + 22], ax           ; Time
+    mov     [di + 24], ax           ; Date
+    mov     [di + 26], ax           ; First cluster
+    mov     [di + 28], ax           ; Size low
+    mov     [di + 30], ax           ; Size high
+
+    ; Write directory sector
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.cr16_dir_sector]
+    call    fat_write_sector
+    mov     es, [save_ds]           ; Restore ES to caller's segment
+    mov     di, [save_dx]           ; Restore FCB pointer
+    jc      .error_16
+
+.init_fcb_16:
+    ; Initialize FCB fields
+    ; ES:DI = FCB pointer
+    mov     word [es:di + FCB_CUR_BLOCK], 0
+    mov     word [es:di + FCB_REC_SIZE], 128
+    mov     word [es:di + FCB_FILE_SIZE], 0
+    mov     word [es:di + FCB_FILE_SIZE + 2], 0
+    mov     word [es:di + FCB_DATE], 0
+    mov     word [es:di + FCB_TIME], 0
+    mov     byte [es:di + FCB_CUR_REC], 0
+    mov     word [es:di + FCB_RAND_REC], 0
+    mov     word [es:di + FCB_RAND_REC + 2], 0
+
+    ; Store first cluster (0) and dir info in reserved area
+    mov     word [es:di + FCB_RESERVED], 0          ; First cluster
+    mov     ax, [.cr16_dir_sector]
+    mov     [es:di + FCB_RESERVED + 2], ax          ; Dir sector
+    mov     ax, [.cr16_dir_index]
+    mov     [es:di + FCB_RESERVED + 4], ax          ; Dir index
+
+    ; Return success
+    mov     byte [save_ax], 0
+
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
     ret
+
+.read_error_16:
+    add     sp, 4                   ; Clean up pushed ax, cx
+.dir_full_16:
+.error_16:
+    mov     byte [save_ax], 0xFF
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    ret
+
+; Local data for FCB Create
+.cr16_dir_sector    dw  0
+.cr16_dir_index     dw  0
 
 ; ---------------------------------------------------------------------------
 ; int21_17 - FCB Rename file
@@ -637,10 +1120,268 @@ int21_21:
 ; Writes one record from DTA to random record position
 ; ---------------------------------------------------------------------------
 int21_22:
-    ; Not fully implemented - return error
-    ; A full implementation would write to disk, update FAT, etc.
-    mov     byte [save_ax], 0x02    ; Error
+    push    es
+    push    si
+    push    di
+    push    bx
+    push    cx
+    push    dx
+    push    bp
+
+    ; Get FCB pointer
+    mov     es, [save_ds]
+    mov     bp, [save_dx]           ; ES:BP = FCB
+
+    ; Get random record number and calculate file offset
+    mov     ax, [es:bp + FCB_RAND_REC]
+    mov     bx, [es:bp + FCB_REC_SIZE]
+    mul     bx                      ; DX:AX = file offset
+
+    ; Save file offset
+    mov     [.wr22_offset], ax
+    mov     [.wr22_offset + 2], dx
+
+    ; Calculate which cluster we need
+    mov     ax, [.wr22_offset + 2]
+    mov     dx, [.wr22_offset]
+    mov     cx, 9
+.shift_22:
+    shr     ax, 1
+    rcr     dx, 1
+    loop    .shift_22
+    mov     [.wr22_cluster_idx], dx
+
+    ; Get first cluster from FCB
+    mov     ax, [es:bp + FCB_RESERVED]
+
+    ; If file has no clusters yet, allocate first one
+    test    ax, ax
+    jnz     .have_cluster_22
+    call    fat_alloc_cluster
+    jc      .disk_full_22
+    push    ax
+    mov     dx, 0x0FFF
+    call    fat_set_cluster
+    pop     ax
+    mov     [es:bp + FCB_RESERVED], ax
+    ; Update directory entry with new first cluster
+    push    ax
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    push    ax
+    mov     ax, [save_ds]
+    mov     es, ax
+    mov     ax, [es:bp + FCB_RESERVED + 2]
+    push    cs
+    pop     es
+    call    fat_read_sector
+    pop     ax
+    jc      .error_22_pop
+
+    mov     es, [save_ds]
+    mov     di, [es:bp + FCB_RESERVED + 4]
+    push    cs
+    pop     es
+    shl     di, 5
+    add     di, disk_buffer
+    pop     ax
+    mov     [di + 26], ax
+
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [save_ds]
+    push    ax
+    mov     es, ax
+    mov     ax, [es:bp + FCB_RESERVED + 2]
+    pop     bx
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_write_sector
+    jc      .error_22
+    mov     es, [save_ds]
+
+.have_cluster_22:
+    ; Walk cluster chain
+    mov     cx, [.wr22_cluster_idx]
+    test    cx, cx
+    jz      .at_cluster_22
+
+.walk_22:
+    push    cx
+    push    ax
+    call    fat_get_next_cluster
+    cmp     ax, 0x0FF8
+    jae     .need_extend_22
+    mov     bx, ax
+    pop     ax
+    mov     ax, bx
+    pop     cx
+    dec     cx
+    jnz     .walk_22
+    jmp     .at_cluster_22
+
+.need_extend_22:
+    pop     ax
+    pop     cx
+    push    ax
+    call    fat_alloc_cluster
+    jc      .disk_full_22_pop
+    mov     bx, ax
+    pop     ax
+    push    bx
+    mov     dx, bx
+    call    fat_set_cluster
+    pop     ax
+    push    ax
+    mov     dx, 0x0FFF
+    call    fat_set_cluster
+    pop     ax
+    dec     cx
+    jnz     .walk_22
+
+.at_cluster_22:
+    mov     [.wr22_cur_cluster], ax
+
+    ; Read sector
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_cluster_to_lba
+    push    ax
+    call    fat_read_sector
+    pop     ax
+    jc      .error_22
+
+    ; Calculate offset within sector
+    mov     bx, [.wr22_offset]
+    and     bx, 0x01FF
+
+    ; Copy from DTA to disk_buffer
+    mov     es, [save_ds]
+    mov     cx, [es:bp + FCB_REC_SIZE]
+    mov     si, [current_dta_off]
+    push    ds
+    mov     ds, [current_dta_seg]
+    push    cs
+    pop     es
+    mov     di, disk_buffer
+    add     di, bx
+    rep     movsb
+    pop     ds
+
+    ; Write sector back
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.wr22_cur_cluster]
+    call    fat_cluster_to_lba
+    call    fat_write_sector
+    jc      .error_22
+
+    ; Update file size if needed
+    mov     ax, [.wr22_offset]
+    mov     dx, [.wr22_offset + 2]
+    mov     es, [save_ds]
+    mov     cx, [es:bp + FCB_REC_SIZE]
+    add     ax, cx
+    adc     dx, 0
+
+    cmp     dx, [es:bp + FCB_FILE_SIZE + 2]
+    jb      .done_22
+    ja      .update_size_22
+    cmp     ax, [es:bp + FCB_FILE_SIZE]
+    jbe     .done_22
+
+.update_size_22:
+    mov     [es:bp + FCB_FILE_SIZE], ax
+    mov     [es:bp + FCB_FILE_SIZE + 2], dx
+
+    ; Update directory entry
+    push    ax
+    push    dx
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    push    ax
+    mov     ax, [save_ds]
+    mov     es, ax
+    mov     ax, [es:bp + FCB_RESERVED + 2]
+    push    cs
+    pop     es
+    call    fat_read_sector
+    pop     ax
+    jc      .error_22_pop2
+
+    mov     es, [save_ds]
+    mov     di, [es:bp + FCB_RESERVED + 4]
+    push    cs
+    pop     es
+    shl     di, 5
+    add     di, disk_buffer
+    pop     dx
+    pop     ax
+    mov     [di + 28], ax
+    mov     [di + 30], dx
+    mov     es, [save_ds]
+    mov     ax, [es:bp + FCB_RESERVED]
+    push    cs
+    pop     es
+    mov     [di + 26], ax
+
+    mov     bx, disk_buffer
+    mov     es, [save_ds]
+    mov     ax, [es:bp + FCB_RESERVED + 2]
+    push    cs
+    pop     es
+    call    fat_write_sector
+    jc      .error_22
+
+.done_22:
+    mov     byte [save_ax], 0
+    pop     bp
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
     ret
+
+.error_22_pop2:
+    add     sp, 4
+.error_22_pop:
+    add     sp, 2
+.error_22:
+    mov     byte [save_ax], 2
+    pop     bp
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    ret
+
+.disk_full_22_pop:
+    add     sp, 4
+.disk_full_22:
+    mov     byte [save_ax], 1
+    pop     bp
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    ret
+
+; Local data for FCB Random Write
+.wr22_offset        dd  0
+.wr22_cluster_idx   dw  0
+.wr22_cur_cluster   dw  0
 
 ; ---------------------------------------------------------------------------
 ; int21_23 - FCB Get File Size

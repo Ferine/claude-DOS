@@ -361,8 +361,26 @@ load_exe:
     mov     di, [si]                ; Offset
     mov     ax, [si + 2]            ; Segment (relative)
 
+    ; Bounds check: verify relocation target is within loaded image
     ; Compute absolute segment: load_seg + reloc_seg
     add     ax, [.load_seg]
+
+    ; Check segment is within loaded image bounds
+    ; End segment = load_seg + (bytes_loaded >> 4) + 1
+    push    dx
+    mov     dx, [.bytes_loaded]
+    shr     dx, 4                   ; Convert bytes to paragraphs
+    add     dx, [.load_seg]
+    inc     dx                      ; One past the end
+    cmp     ax, [.load_seg]
+    jb      .reloc_skip_invalid     ; Before start of image
+    cmp     ax, dx
+    jae     .reloc_skip_invalid     ; Past end of image
+    pop     dx
+
+    ; Also verify offset doesn't go past segment end (need room for word)
+    cmp     di, 0xFFFE
+    ja      .reloc_skip_entry       ; Offset too large for word fixup
 
     ; Fix up the word at that address
     push    es
@@ -373,9 +391,15 @@ load_exe:
     pop     bx
     pop     es
 
+.reloc_next_entry:
     add     si, 4                   ; Next relocation entry
     dec     cx
     jmp     .reloc_loop
+
+.reloc_skip_invalid:
+    pop     dx                      ; Clean up from bounds check
+.reloc_skip_entry:
+    jmp     .reloc_next_entry       ; Skip this malformed entry
 
 .reloc_eof_pop:
     pop     cx                      ; Clean up stack

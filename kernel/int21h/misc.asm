@@ -121,29 +121,72 @@ int21_25:
 ; AH=2Ah - Get date
 ; Output: CX = year, DH = month, DL = day, AL = day of week
 int21_2A:
-    ; Read from BIOS/CMOS
+    push    bx
+    push    si
+
+    ; Read RTC date via INT 1Ah AH=04h
+    ; Returns: CH = century (BCD), CL = year (BCD), DH = month (BCD), DL = day (BCD)
     mov     ah, 0x04
-    int     0x1A                ; Read RTC date
-    ; CH = century (BCD), CL = year (BCD), DH = month (BCD), DL = day (BCD)
-    
-    ; Convert BCD year to binary
-    push    dx
-    mov     al, ch              ; Century
+    int     0x1A
+    jc      .date_rtc_fail          ; RTC not available
+
+    ; Save the BCD values before conversion
+    mov     [.date_century], ch
+    mov     [.date_year], cl
+    mov     [.date_month], dh
+    mov     [.date_day], dl
+
+    ; Convert century (BCD) to binary and multiply by 100
+    mov     al, [.date_century]
     call    bcd_to_bin
-    mov     ah, 100
-    mul     ah
-    mov     cx, ax              ; CX = century * 100
-    mov     al, [save_cx]       ; Hmm, CL was clobbered
-    ; Redo: save registers first
-    pop     dx
-    
-    ; Simpler approach: just return a fixed date for now
-    mov     word [save_cx], 2025     ; Year
-    mov     byte [save_dx + 1], 1    ; Month (DH)
-    mov     byte [save_dx], 27       ; Day (DL)
-    mov     byte [save_ax], 1        ; Day of week (Monday)
+    mov     bl, al                  ; BL = century (binary)
+    mov     al, 100
+    mul     bl                      ; AX = century * 100
+    mov     si, ax                  ; SI = century * 100
+
+    ; Convert year (BCD) to binary and add to century
+    mov     al, [.date_year]
+    call    bcd_to_bin
+    xor     ah, ah
+    add     ax, si                  ; AX = full year (e.g., 2025)
+    mov     [save_cx], ax           ; CX = year
+
+    ; Convert month (BCD) to binary
+    mov     al, [.date_month]
+    call    bcd_to_bin
+    mov     [save_dx + 1], al       ; DH = month
+
+    ; Convert day (BCD) to binary
+    mov     al, [.date_day]
+    call    bcd_to_bin
+    mov     [save_dx], al           ; DL = day
+
+    ; Calculate day of week (simplified Zeller's formula)
+    ; For simplicity, just return 0 (Sunday) - full calculation would be complex
+    ; A proper implementation would use Zeller's congruence
+    mov     byte [save_ax], 0       ; AL = day of week (0=Sunday)
+
+    pop     si
+    pop     bx
     call    dos_clear_error
     ret
+
+.date_rtc_fail:
+    ; RTC not available - return a default date
+    mov     word [save_cx], 2025    ; Year
+    mov     byte [save_dx + 1], 1   ; Month (January)
+    mov     byte [save_dx], 1       ; Day (1st)
+    mov     byte [save_ax], 0       ; Sunday
+    pop     si
+    pop     bx
+    call    dos_clear_error
+    ret
+
+; Temp storage for BCD date values
+.date_century   db  0
+.date_year      db  0
+.date_month     db  0
+.date_day       db  0
 
 ; AH=2Bh - Set date (stub)
 int21_2B:

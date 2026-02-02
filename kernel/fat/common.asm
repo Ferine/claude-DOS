@@ -741,6 +741,40 @@ resolve_path:
     call    parse_path_component
     jc      .path_not_found
 
+    ; Check for special "." component (current directory - stay here)
+    cmp     byte [fcb_name_buffer], '.'
+    jne     .not_dot
+    cmp     byte [fcb_name_buffer + 1], ' '
+    jne     .check_dotdot
+    ; Component is "." - stay in current directory
+    jmp     .process_component
+
+.check_dotdot:
+    ; Check for ".." component (parent directory)
+    cmp     byte [fcb_name_buffer + 1], '.'
+    jne     .not_dot
+    cmp     byte [fcb_name_buffer + 2], ' '
+    jne     .not_dot
+    ; Component is ".." - navigate to parent
+    ; If we're at root (AX=0), stay at root
+    test    ax, ax
+    jz      .process_component      ; Already at root, ".." stays at root
+
+    ; Find ".." entry in current directory to get parent cluster
+    push    di                      ; Save path end marker
+    push    si                      ; Save current position
+    mov     si, .dotdot_name        ; FCB name for ".."
+    call    fat_find_in_directory
+    mov     bx, di                  ; Save entry pointer
+    pop     si
+    pop     di
+    jc      .path_not_found         ; ".." not found (shouldn't happen)
+
+    ; Get parent cluster from ".." entry
+    mov     ax, [bx + 26]           ; First cluster of parent (0 = root)
+    jmp     .process_component
+
+.not_dot:
     ; Search for this component in current directory
     ; Save DI (path marker) and SI (current position)
     push    di                      ; Save path end marker
@@ -762,6 +796,9 @@ resolve_path:
     mov     ax, [bx + 26]       ; First cluster of subdirectory
     jmp     .process_component
 
+; FCB-format name for ".." entry
+.dotdot_name    db  '..         '
+
 .last_component:
     ; Skip leading slash if present
     cmp     byte [si], '\'
@@ -777,6 +814,40 @@ resolve_path:
     pop     ax
     jc      .path_not_found
 
+    ; Check if final component is "." (refers to current directory itself)
+    cmp     byte [fcb_name_buffer], '.'
+    jne     .final_not_dot
+    cmp     byte [fcb_name_buffer + 1], ' '
+    jne     .check_final_dotdot
+    ; Final component is "." - AX already has current directory cluster
+    ; fcb_name_buffer contains "." which is valid (refers to dir itself)
+    jmp     .resolve_done
+
+.check_final_dotdot:
+    ; Check if final component is ".."
+    cmp     byte [fcb_name_buffer + 1], '.'
+    jne     .final_not_dot
+    cmp     byte [fcb_name_buffer + 2], ' '
+    jne     .final_not_dot
+    ; Final component is ".." - navigate to parent
+    test    ax, ax
+    jz      .resolve_done           ; At root, ".." stays at root
+
+    ; Find ".." entry in current directory
+    push    si
+    mov     si, .dotdot_name
+    call    fat_find_in_directory
+    mov     bx, di
+    pop     si
+    jc      .path_not_found
+
+    ; Get parent cluster
+    mov     ax, [bx + 26]
+    ; fcb_name_buffer still contains ".." which is valid
+    jmp     .resolve_done
+
+.final_not_dot:
+.resolve_done:
     ; AX = directory cluster, fcb_name_buffer = filename
     pop     di
     pop     dx
