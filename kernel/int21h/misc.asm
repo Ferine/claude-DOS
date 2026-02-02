@@ -8,98 +8,6 @@ int21_25:
     push    es
     push    bx
 
-    ; Debug: print vector number and full segment:offset being set
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_25_trace
-    push    ax
-    push    bx
-    push    dx
-    mov     al, '('
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    ; Print vector number
-    mov     al, [cs:save_ax]
-    call    .print_hex_byte
-    mov     al, '='
-    mov     ah, 0x0E
-    int     0x10
-    ; Print segment
-    mov     ax, [cs:save_ds]
-    call    .print_hex_word
-    mov     al, ':'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    ; Print offset
-    mov     ax, [cs:save_dx]
-    call    .print_hex_word
-    mov     al, ')'
-    mov     ah, 0x0E
-    int     0x10
-    pop     dx
-    pop     bx
-    pop     ax
-    jmp     .skip_25_trace
-
-.print_hex_word:
-    ; Print AX as 4 hex digits
-    push    ax
-    push    cx
-    mov     cx, 4
-.phw_loop:
-    rol     ax, 4
-    push    ax
-    and     al, 0x0F
-    add     al, '0'
-    cmp     al, '9'
-    jbe     .phw_digit
-    add     al, 7
-.phw_digit:
-    push    bx
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    pop     bx
-    pop     ax
-    loop    .phw_loop
-    pop     cx
-    pop     ax
-    ret
-
-.print_hex_byte:
-    ; Print AL as 2 hex digits
-    push    ax
-    push    bx
-    mov     ah, al
-    shr     al, 4
-    add     al, '0'
-    cmp     al, '9'
-    jbe     .phb1
-    add     al, 7
-.phb1:
-    mov     bx, 0
-    mov     ah, 0x0E
-    int     0x10
-    pop     bx
-    pop     ax
-    push    ax
-    and     al, 0x0F
-    add     al, '0'
-    cmp     al, '9'
-    jbe     .phb2
-    add     al, 7
-.phb2:
-    push    bx
-    mov     bx, 0
-    mov     ah, 0x0E
-    int     0x10
-    pop     bx
-    pop     ax
-    ret
-
-.skip_25_trace:
-
     xor     bx, bx
     mov     es, bx
 
@@ -286,38 +194,6 @@ int21_34:
 int21_35:
     push    ds
     push    si
-
-    ; Debug: print which vector is being requested
-    cmp     byte [cs:debug_trace], 0
-    je      .skip_35_trace
-    push    ax
-    push    bx
-    mov     al, '{'
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
-    mov     al, [cs:save_ax]    ; Vector number
-    push    ax
-    shr     al, 4
-    add     al, '0'
-    cmp     al, '9'
-    jbe     .t35_1
-    add     al, 7
-.t35_1:
-    int     0x10
-    pop     ax
-    and     al, 0x0F
-    add     al, '0'
-    cmp     al, '9'
-    jbe     .t35_2
-    add     al, 7
-.t35_2:
-    int     0x10
-    mov     al, '}'
-    int     0x10
-    pop     bx
-    pop     ax
-.skip_35_trace:
 
     xor     si, si
     mov     ds, si              ; DS = 0 (IVT segment)

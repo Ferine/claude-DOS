@@ -40,6 +40,13 @@ batch_line      dw  0           ; Current line number
 batch_file      times 128 db 0  ; Batch file path
 batch_params    times 128 db 0  ; Batch file parameters (%0-%9)
 
+; Batch CALL stack (single level)
+batch_call_depth db  0          ; 0 = top level, 1 = in CALL
+batch_save_handle dw 0xFFFF     ; Saved parent handle
+batch_save_pos   dd  0          ; Saved file position
+batch_save_file  times 128 db 0 ; Saved parent batch filename
+batch_save_params times 128 db 0 ; Saved parent parameters
+
 ; Echo state
 echo_on         db  1           ; 1 = echo is on
 

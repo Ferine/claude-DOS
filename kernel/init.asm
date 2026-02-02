@@ -52,8 +52,8 @@ kernel_init:
     mov     si, msg_init_done
     call    bios_print_string
 
-    ; Enable INT 21h debug tracing for debugging
-    mov     byte [debug_trace], 1
+    ; INT 21h debug tracing (0=off, 1=on)
+    mov     byte [debug_trace], 0
 
     ret
 

@@ -8,43 +8,6 @@
 ; Hooks extended memory functions, chains others to BIOS
 ; ---------------------------------------------------------------------------
 int15_handler:
-    ; Debug: print INT 15h function
-    push    ax
-    push    bx
-    mov     al, '('
-    mov     bx, 0x0007
-    mov     ah, 0x0E
-    int     0x10
-    pop     bx
-    pop     ax
-    push    ax
-    push    bx
-    ; Print AH
-    mov     al, ah
-    push    ax
-    shr     al, 4
-    add     al, '0'
-    cmp     al, '9'
-    jbe     .i1
-    add     al, 7
-.i1:
-    mov     ah, 0x0E
-    mov     bx, 0x0007
-    int     0x10
-    pop     ax
-    and     al, 0x0F
-    add     al, '0'
-    cmp     al, '9'
-    jbe     .i2
-    add     al, 7
-.i2:
-    mov     ah, 0x0E
-    int     0x10
-    mov     al, ')'
-    int     0x10
-    pop     bx
-    pop     ax
-
     ; Check for extended memory size query (AH=88h)
     cmp     ah, 88h
     je      .get_ext_mem_size

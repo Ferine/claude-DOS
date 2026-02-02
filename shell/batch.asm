@@ -118,6 +118,16 @@ batch_execute:
     mov     bx, [batch_handle]
     mov     ah, 0x3E
     int     0x21
+
+    ; Check if returning from CALL
+    cmp     byte [batch_call_depth], 0
+    je      .eof_end_batch
+
+    ; Restore parent batch state
+    call    batch_call_restore
+    jmp     .next_line          ; Continue parent batch
+
+.eof_end_batch:
     mov     byte [batch_active], 0
     mov     word [batch_handle], 0xFFFF
 
@@ -315,8 +325,93 @@ batch_check_cmd:
     ; CALL: execute another batch file, then return
     mov     si, [batch_cmd_args]
     call    skip_spaces
-    ; Stub: just print message
-    mov     dx, batch_call_stub
+
+    ; Check if already in a CALL (only 1 level supported)
+    cmp     byte [batch_call_depth], 0
+    jne     .call_nested_err
+
+    ; Save current batch state
+    mov     byte [batch_call_depth], 1
+
+    ; Save current file handle
+    mov     ax, [batch_handle]
+    mov     [batch_save_handle], ax
+
+    ; Save current file position
+    mov     bx, [batch_handle]
+    mov     ax, 0x4201          ; Seek from current, offset 0
+    xor     cx, cx
+    xor     dx, dx
+    int     0x21
+    mov     word [batch_save_pos], ax
+    mov     word [batch_save_pos + 2], dx
+
+    ; Save current batch filename
+    push    si
+    mov     si, batch_file
+    mov     di, batch_save_file
+.call_save_file:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .call_save_file
+
+    ; Save current parameters
+    mov     si, batch_params
+    mov     di, batch_save_params
+.call_save_params:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .call_save_params
+    pop     si
+
+    ; Parse new batch filename (SI points to it)
+    mov     di, batch_file
+.call_copy_file:
+    lodsb
+    cmp     al, ' '
+    je      .call_file_done
+    test    al, al
+    jz      .call_file_done
+    stosb
+    jmp     .call_copy_file
+.call_file_done:
+    mov     byte [di], 0
+
+    ; Copy remaining as new parameters
+    call    skip_spaces
+    mov     di, batch_params
+.call_copy_params:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .call_copy_params
+
+    ; Open new batch file
+    mov     dx, batch_file
+    mov     ax, 0x3D00
+    int     0x21
+    jc      .call_open_err
+    mov     [batch_handle], ax
+    mov     word [batch_line], 0
+
+    pop     si
+    mov     al, 1
+    ret
+
+.call_nested_err:
+    mov     dx, batch_call_nested
+    mov     ah, 0x09
+    int     0x21
+    pop     si
+    mov     al, 1
+    ret
+
+.call_open_err:
+    ; Restore state on error
+    call    batch_call_restore
+    mov     dx, batch_err_open
     mov     ah, 0x09
     int     0x21
     pop     si
@@ -324,8 +419,39 @@ batch_check_cmd:
     ret
 
 .is_shift:
-    ; SHIFT: shift parameters left
-    ; Stub
+    ; SHIFT: shift parameters left (remove first parameter)
+    push    di
+    mov     si, batch_params
+    ; Skip leading spaces
+.shift_skip_sp:
+    cmp     byte [si], ' '
+    jne     .shift_find_end
+    inc     si
+    jmp     .shift_skip_sp
+.shift_find_end:
+    ; Skip first parameter (until space or end)
+    cmp     byte [si], 0
+    je      .shift_done
+    cmp     byte [si], ' '
+    je      .shift_copy
+    inc     si
+    jmp     .shift_find_end
+.shift_copy:
+    ; Skip spaces after first param
+    cmp     byte [si], ' '
+    jne     .shift_do_copy
+    inc     si
+    jmp     .shift_copy
+.shift_do_copy:
+    ; Copy remaining parameters to start
+    mov     di, batch_params
+.shift_copy_loop:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .shift_copy_loop
+.shift_done:
+    pop     di
     pop     si
     mov     al, 1
     ret
@@ -423,6 +549,46 @@ batch_goto:
     ret
 
 ; ---------------------------------------------------------------------------
+; batch_call_restore - Restore parent batch state after CALL returns
+; ---------------------------------------------------------------------------
+batch_call_restore:
+    pusha
+
+    mov     byte [batch_call_depth], 0
+
+    ; Restore handle
+    mov     ax, [batch_save_handle]
+    mov     [batch_handle], ax
+
+    ; Restore file position
+    mov     bx, ax
+    mov     ax, 0x4200          ; Seek from beginning
+    mov     dx, word [batch_save_pos]
+    mov     cx, word [batch_save_pos + 2]
+    int     0x21
+
+    ; Restore filename
+    mov     si, batch_save_file
+    mov     di, batch_file
+.restore_file:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .restore_file
+
+    ; Restore parameters
+    mov     si, batch_save_params
+    mov     di, batch_params
+.restore_params:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .restore_params
+
+    popa
+    ret
+
+; ---------------------------------------------------------------------------
 ; batch_if - Process IF command
 ; Supports: IF EXIST file, IF ERRORLEVEL n, IF string1==string2
 ; Also: IF NOT ...
@@ -494,9 +660,80 @@ batch_if:
     jmp     .apply_condition
 
 .check_string:
-    ; String comparison: string1==string2
-    ; Skip for now - just fail condition
+    ; String comparison: string1==string2 or "string1"=="string2"
+    ; SI points to start of comparison
+
+    ; Parse first string into batch_str1
+    mov     di, batch_str1
+    call    .parse_if_string
+
+    ; Check for ==
+    cmp     byte [si], '='
+    jne     .str_no_match
+    inc     si
+    cmp     byte [si], '='
+    jne     .str_no_match
+    inc     si
+
+    ; Parse second string into batch_str2
+    mov     di, batch_str2
+    call    .parse_if_string
+
+    ; Compare strings
+    push    si
+    mov     si, batch_str1
+    mov     di, batch_str2
+.str_cmp_loop:
+    lodsb
+    mov     ah, [di]
+    inc     di
+    cmp     al, ah
+    jne     .str_not_equal
+    test    al, al
+    jnz     .str_cmp_loop
+    ; Strings equal
+    pop     si
+    mov     al, 1
+    jmp     .apply_condition
+
+.str_not_equal:
+    pop     si
+.str_no_match:
     xor     al, al
+    jmp     .apply_condition
+
+; Parse string for IF comparison (handles quotes)
+; Input: SI = source, DI = destination buffer
+; Output: SI advanced past string, DI buffer filled
+.parse_if_string:
+    cmp     byte [si], '"'
+    je      .parse_quoted
+    ; Unquoted: read until space or = or end
+.parse_unquoted:
+    lodsb
+    cmp     al, ' '
+    je      .parse_str_done
+    cmp     al, '='
+    je      .parse_str_backup
+    test    al, al
+    jz      .parse_str_backup
+    stosb
+    jmp     .parse_unquoted
+.parse_str_backup:
+    dec     si
+.parse_str_done:
+    mov     byte [di], 0
+    ret
+.parse_quoted:
+    inc     si              ; Skip opening quote
+.parse_q_loop:
+    lodsb
+    cmp     al, '"'
+    je      .parse_str_done
+    test    al, al
+    jz      .parse_str_done
+    stosb
+    jmp     .parse_q_loop
 
 .apply_condition:
     ; Apply NOT if needed
@@ -716,7 +953,9 @@ batch_cmd_word  times 12 db 0
 batch_cmd_args  dw  0
 batch_goto_target times 32 db 0
 batch_if_negate db  0
+batch_str1      times 64 db 0   ; IF string comparison buffer 1
+batch_str2      times 64 db 0   ; IF string comparison buffer 2
 batch_err_open  db  'Batch file not found', 0x0D, 0x0A, '$'
 batch_pause_msg db  'Press any key to continue . . . $'
 batch_label_err db  'Label not found', 0x0D, 0x0A, '$'
-batch_call_stub db  'CALL: not yet implemented', 0x0D, 0x0A, '$'
+batch_call_nested db 'Nested CALL not supported', 0x0D, 0x0A, '$'
