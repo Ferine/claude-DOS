@@ -376,9 +376,84 @@ load_exe:
     mov     si, disk_buffer         ; Reset to start of buffer
 
 .reloc_process_entry:
+    ; Check if relocation entry spans sector boundary
+    ; Entry is 4 bytes: offset (word) + segment (word)
+    mov     ax, si
+    add     ax, 4
+    cmp     ax, disk_buffer + 512
+    jbe     .reloc_no_boundary      ; Entry fits in current sector
+
+    ; Entry spans boundary - need to handle specially
+    ; Save partial bytes at end of current sector
+    push    cx
+    mov     ax, disk_buffer + 512
+    sub     ax, si                  ; AX = bytes remaining in current sector (1, 2, or 3)
+    mov     [.reloc_partial_len], al
+
+    ; Copy partial bytes to temp area
+    mov     di, .reloc_partial
+    mov     cx, ax
+    push    ds
+    push    cs
+    pop     ds
+    rep     movsb                   ; Copy 1-3 bytes to partial buffer
+    pop     ds
+
+    ; Read next sector
+    mov     ax, [.reloc_cur_cluster]
+    call    fat_get_next_cluster
+    cmp     ax, 0x0FF8
+    pop     cx                      ; Restore reloc count
+    jae     .reloc_eof              ; Unexpected EOF
+    mov     [.reloc_cur_cluster], ax
+
+    push    cx
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_cluster_to_lba
+    call    fat_read_sector
+    pop     cx
+    jc      .read_error
+
+    ; Copy remaining bytes of entry from new sector
+    mov     si, disk_buffer
+    mov     di, .reloc_partial
+    xor     bx, bx
+    mov     bl, [.reloc_partial_len]
+    add     di, bx                  ; DI points past partial bytes
+    mov     ax, 4
+    sub     ax, bx                  ; AX = remaining bytes to copy (1-3)
+    push    cx
+    mov     cx, ax
+    push    ds
+    push    cs
+    pop     ds
+.copy_remaining:
+    lodsb                           ; Load from DS:SI (disk_buffer)
+    stosb                           ; Store to ES:DI (reloc_partial) - but ES=CS
+    loop    .copy_remaining
+    pop     ds
+    pop     cx
+
+    ; Update SI to point past the bytes we just read
+    ; SI now points into disk_buffer at the position after the partial entry
+    ; (SI was advanced by the lodsb loop)
+
+    ; Now read the entry from .reloc_partial
+    ; SI already points to next entry in the new sector (was advanced by lodsb)
+    mov     di, [cs:.reloc_partial]         ; Offset
+    mov     ax, [cs:.reloc_partial + 2]     ; Segment (relative)
+    mov     byte [.reloc_boundary_flag], 1  ; Set flag to skip add si,4 later
+    jmp     .reloc_have_entry
+
+.reloc_no_boundary:
     ; Read relocation entry: offset (word), segment (word)
     mov     di, [si]                ; Offset
     mov     ax, [si + 2]            ; Segment (relative)
+    mov     byte [.reloc_boundary_flag], 0  ; Clear flag
+
+.reloc_have_entry:
 
     ; Bounds check: verify relocation target is within loaded image
     ; Compute absolute segment: load_seg + reloc_seg
@@ -418,7 +493,10 @@ load_exe:
     pop     es
 
 .reloc_next_entry:
+    cmp     byte [.reloc_boundary_flag], 0
+    jne     .reloc_skip_si_advance  ; SI already advanced for boundary case
     add     si, 4                   ; Next relocation entry
+.reloc_skip_si_advance:
     dec     cx
     jmp     .reloc_loop
 
@@ -426,6 +504,10 @@ load_exe:
     pop     dx                      ; Clean up from bounds check
 .reloc_skip_entry:
     jmp     .reloc_next_entry       ; Skip this malformed entry
+
+.reloc_eof:
+    ; Fall through to no_relocs - partial relocation is better than crashing
+    jmp     .no_relocs
 
 .reloc_eof_pop:
     pop     cx                      ; Clean up stack
@@ -513,6 +595,9 @@ load_exe:
 .reloc_sector_off  dw  0           ; Sectors to skip to reach reloc table
 .reloc_byte_off    dw  0           ; Byte offset within reloc sector
 .reloc_cur_cluster dw  0           ; Current cluster for reloc reading
+.reloc_partial     dd  0           ; Temp storage for boundary-crossing relocation
+.reloc_partial_len db  0           ; Bytes saved in partial buffer
+.reloc_boundary_flag db 0          ; Flag: 1 if last entry was boundary-crossing
 
 ; MZ Header offsets
 MZ_SIGNATURE       equ     0x00    ; 'MZ' signature

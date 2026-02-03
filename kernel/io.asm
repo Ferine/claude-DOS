@@ -125,6 +125,9 @@ kernel_entry:
 %include "device/clock.asm"
 %include "device/ramdisk.asm"
 
+; Mouse driver
+%include "mouse.asm"
+
 ; ---------------------------------------------------------------------------
 ; bios_print_string - Print null-terminated string at DS:SI via BIOS
 ; Used during early boot before INT 21h is available

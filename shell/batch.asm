@@ -278,6 +278,12 @@ batch_check_cmd:
     call    str_equal
     je      .is_shift
 
+    ; Check FOR
+    mov     si, batch_cmd_word
+    mov     di, .str_for
+    call    str_equal
+    je      .is_for
+
     ; Not a batch command
     pop     si
     xor     al, al
@@ -456,12 +462,21 @@ batch_check_cmd:
     mov     al, 1
     ret
 
+.is_for:
+    mov     si, [batch_cmd_args]
+    call    skip_spaces
+    call    batch_for
+    pop     si
+    mov     al, 1
+    ret
+
 .str_rem    db  'REM', 0
 .str_pause  db  'PAUSE', 0
 .str_goto   db  'GOTO', 0
 .str_if     db  'IF', 0
 .str_call   db  'CALL', 0
 .str_shift  db  'SHIFT', 0
+.str_for    db  'FOR', 0
 
 ; ---------------------------------------------------------------------------
 ; batch_goto - Seek to label in batch file
@@ -851,7 +866,89 @@ batch_substitute:
     jmp     .subst_loop
 
 .not_param:
-    ; Just a % followed by something else, store the %
+    ; Check for %VARNAME% environment variable
+    ; AL = first char after %, SI points to char after that
+    cmp     al, '%'                 ; %% = literal %
+    je      .store_percent
+    cmp     al, 'A'
+    jb      .store_percent_literal
+    cmp     al, 'z'
+    ja      .store_percent_literal
+    cmp     al, 'Z'
+    jbe     .is_env_var
+    cmp     al, 'a'
+    jb      .store_percent_literal
+
+.is_env_var:
+    ; Looks like %VARNAME% - extract the name
+    dec     si                      ; Back to first letter
+    push    si
+    push    di
+    mov     di, set_name_buf
+    xor     cx, cx
+.copy_varname:
+    lodsb
+    cmp     al, '%'                 ; End of variable name
+    je      .varname_done
+    cmp     al, ' '                 ; Unexpected space
+    je      .varname_fail
+    test    al, al                  ; Unexpected end
+    jz      .varname_fail
+    ; Uppercase
+    cmp     al, 'a'
+    jb      .store_varchar
+    cmp     al, 'z'
+    ja      .store_varchar
+    sub     al, 0x20
+.store_varchar:
+    stosb
+    inc     cx
+    cmp     cx, 30                  ; Max var name length
+    jb      .copy_varname
+.varname_fail:
+    ; Not a valid variable reference, restore and output literal
+    pop     di
+    pop     si
+    jmp     .store_percent_literal
+
+.varname_done:
+    mov     byte [di], 0            ; Null terminate name
+    pop     di
+    add     sp, 2                   ; Discard saved SI (we're past the varname now)
+
+    ; Look up the variable
+    call    env_get
+    jc      .env_not_found
+
+    ; Copy value from set_value_buf to output
+    push    si
+    mov     si, set_value_buf
+.copy_env_val:
+    lodsb
+    test    al, al
+    jz      .env_val_done
+    stosb
+    jmp     .copy_env_val
+.env_val_done:
+    pop     si
+    jmp     .subst_loop
+
+.env_not_found:
+    ; Variable not found - output nothing (like DOS)
+    jmp     .subst_loop
+
+.store_percent_literal:
+    ; Output the % and continue (char after % is still in AL)
+    push    ax
+    mov     al, '%'
+    stosb
+    pop     ax
+    ; Put the char after % back in stream to process normally
+    dec     si
+    jmp     .subst_loop
+
+.store_percent:
+    ; %% becomes single %
     mov     al, '%'
 
 .store_char:
@@ -940,6 +1037,244 @@ batch_get_param:
     jmp     .skip_sp
 .skip_sp_done:
     ret
+
+; ---------------------------------------------------------------------------
+; batch_for - Process FOR command
+; Syntax: FOR %%X IN (set) DO command
+; Input: DS:SI = arguments after "FOR "
+; ---------------------------------------------------------------------------
+batch_for:
+    pusha
+
+    ; Parse %%X or %X (variable name)
+    cmp     byte [si], '%'
+    jne     .for_error
+    inc     si
+    cmp     byte [si], '%'          ; Double %% in batch file
+    jne     .single_pct
+    inc     si
+.single_pct:
+    ; Get variable letter
+    mov     al, [si]
+    cmp     al, 'a'
+    jb      .check_upper
+    cmp     al, 'z'
+    ja      .for_error
+    sub     al, 0x20                ; Uppercase
+.check_upper:
+    cmp     al, 'A'
+    jb      .for_error
+    cmp     al, 'Z'
+    ja      .for_error
+    mov     [for_var_name], al
+    inc     si
+    call    skip_spaces
+
+    ; Expect "IN"
+    cmp     byte [si], 'I'
+    jne     .for_error
+    cmp     byte [si+1], 'N'
+    je      .in_lower_check
+    cmp     byte [si+1], 'n'
+    jne     .for_error
+    jmp     .found_in
+.in_lower_check:
+    cmp     byte [si], 'i'
+    jne     .found_in_upper
+.found_in_upper:
+.found_in:
+    add     si, 2
+    call    skip_spaces
+
+    ; Expect "("
+    cmp     byte [si], '('
+    jne     .for_error
+    inc     si
+    call    skip_spaces
+
+    ; Save start of set
+    mov     [for_set_ptr], si
+
+    ; Find matching ")"
+.find_close:
+    cmp     byte [si], ')'
+    je      .found_close
+    cmp     byte [si], 0
+    je      .for_error
+    inc     si
+    jmp     .find_close
+
+.found_close:
+    mov     byte [si], 0            ; Temporarily null-terminate the set
+    mov     [for_set_end], si
+    inc     si
+    call    skip_spaces
+
+    ; Expect "DO"
+    mov     al, [si]
+    cmp     al, 'D'
+    je      .check_o
+    cmp     al, 'd'
+    jne     .for_error
+.check_o:
+    mov     al, [si+1]
+    cmp     al, 'O'
+    je      .found_do
+    cmp     al, 'o'
+    jne     .for_error
+.found_do:
+    add     si, 2
+    call    skip_spaces
+
+    ; SI now points to the command template
+    ; Save it
+    mov     di, for_cmd_template
+.copy_cmd:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .copy_cmd
+
+    ; Now iterate over the set
+    mov     si, [for_set_ptr]
+
+.for_loop:
+    call    skip_spaces
+    cmp     byte [si], 0
+    je      .for_done
+
+    ; Extract next item (space or comma separated)
+    mov     di, for_item
+.get_item:
+    lodsb
+    test    al, al
+    jz      .item_done_null         ; Hit null terminator
+    cmp     al, ' '
+    je      .item_done
+    cmp     al, ','
+    je      .item_done
+    cmp     al, 0x09                ; Tab
+    je      .item_done
+    stosb
+    jmp     .get_item
+
+.item_done_null:
+    dec     si                      ; Back up SI to point at null for next iteration
+.item_done:
+    mov     byte [di], 0
+
+    ; If item is empty, skip
+    cmp     byte [for_item], 0
+    je      .for_loop
+
+    ; Build command with substitution
+    push    si                      ; Save position in set
+    mov     si, for_cmd_template
+    mov     di, for_cmd_buffer
+.subst_var:
+    lodsb
+    test    al, al
+    jz      .subst_done
+    cmp     al, '%'
+    jne     .store_char
+    ; Check for %%X or %X
+    cmp     byte [si], '%'
+    jne     .check_var
+    inc     si                      ; Skip second %
+.check_var:
+    mov     al, [si]
+    cmp     al, 'a'
+    jb      .check_var_upper
+    cmp     al, 'z'
+    ja      .no_match
+    sub     al, 0x20
+.check_var_upper:
+    cmp     al, [for_var_name]
+    jne     .no_match
+
+    ; Match - substitute the item
+    inc     si
+    push    si
+    mov     si, for_item
+.copy_item:
+    lodsb
+    test    al, al
+    jz      .item_copied
+    stosb
+    jmp     .copy_item
+.item_copied:
+    pop     si
+    jmp     .subst_var
+
+.no_match:
+    mov     al, '%'
+.store_char:
+    stosb
+    jmp     .subst_var
+
+.subst_done:
+    stosb                           ; Store null terminator
+
+    ; Execute the command
+    push    si
+    mov     di, cmd_buffer + 2
+    mov     si, for_cmd_buffer
+.copy_to_cmd:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .copy_to_cmd
+
+    ; Calculate length
+    mov     si, cmd_buffer + 2
+    xor     cl, cl
+.count_for_len:
+    cmp     byte [si], 0
+    je      .len_for_done
+    inc     si
+    inc     cl
+    jmp     .count_for_len
+.len_for_done:
+    mov     [cmd_buffer + 1], cl
+
+    ; Execute
+    mov     si, cmd_buffer + 2
+    call    skip_spaces
+    cmp     byte [si], 0
+    je      .skip_exec
+
+    call    try_internal_cmd
+    test    al, al
+    jnz     .skip_exec
+    call    try_external_cmd
+
+.skip_exec:
+    pop     si                      ; Restore template position (unused)
+    pop     si                      ; Restore set position
+    jmp     .for_loop
+
+.for_done:
+    ; Restore the ')' we overwrote
+    mov     di, [for_set_end]
+    mov     byte [di], ')'
+    popa
+    ret
+
+.for_error:
+    mov     dx, for_syntax_err
+    mov     ah, 0x09
+    int     0x21
+    popa
+    ret
+
+; FOR command data
+for_var_name    db  0               ; Variable letter (uppercase)
+for_set_ptr     dw  0               ; Pointer to start of set
+for_set_end     dw  0               ; Pointer to ')' we overwrote
+for_item        times 64 db 0       ; Current item being processed
+for_cmd_template times 128 db 0     ; Command template (with %%X)
+for_cmd_buffer  times 256 db 0      ; Command with substitution
+for_syntax_err  db  'Syntax error in FOR command', 0x0D, 0x0A, '$'
 
 ; ---------------------------------------------------------------------------
 ; Batch data

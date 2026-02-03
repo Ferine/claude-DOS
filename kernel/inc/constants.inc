@@ -159,3 +159,62 @@ STDPRN              equ     4
 ; XMS (Extended Memory Specification) constants
 XMS_MAX_HANDLES     equ     16          ; Maximum XMS handles
 XMS_HANDLE_SIZE     equ     6           ; Size per handle (2 size + 4 address)
+
+; PS/2 controller ports
+PS2_DATA_PORT       equ     0x60
+PS2_STATUS_PORT     equ     0x64
+PS2_COMMAND_PORT    equ     0x64
+
+; PS/2 status register bits
+PS2_STATUS_OUTPUT   equ     0x01
+PS2_STATUS_INPUT    equ     0x02
+PS2_STATUS_MOUSE    equ     0x20
+
+; PS/2 controller commands
+PS2_CMD_READ_CONFIG equ     0x20
+PS2_CMD_WRITE_CONFIG equ    0x60
+PS2_CMD_DISABLE_PORT2 equ   0xA7
+PS2_CMD_ENABLE_PORT2 equ    0xA8
+PS2_CMD_TEST_PORT2  equ     0xA9
+PS2_CMD_WRITE_PORT2 equ     0xD4
+
+; PS/2 configuration byte bits
+PS2_CFG_PORT1_INT   equ     0x01
+PS2_CFG_PORT2_INT   equ     0x02
+PS2_CFG_PORT1_CLK   equ     0x10
+PS2_CFG_PORT2_CLK   equ     0x20
+
+; Mouse commands
+MOUSE_CMD_SET_SCALE equ     0xE6
+MOUSE_CMD_SET_RES   equ     0xE8
+MOUSE_CMD_STATUS    equ     0xE9
+MOUSE_CMD_STREAM    equ     0xEA
+MOUSE_CMD_READ_DATA equ     0xEB
+MOUSE_CMD_SET_SAMPLE equ    0xF3
+MOUSE_CMD_ENABLE    equ     0xF4
+MOUSE_CMD_DISABLE   equ     0xF5
+MOUSE_CMD_DEFAULT   equ     0xF6
+MOUSE_CMD_RESET     equ     0xFF
+
+; Mouse response codes
+MOUSE_ACK           equ     0xFA
+MOUSE_RESEND        equ     0xFE
+MOUSE_RESET_OK      equ     0xAA
+
+; PIC ports
+PIC1_COMMAND        equ     0x20
+PIC1_DATA           equ     0x21
+PIC2_COMMAND        equ     0xA0
+PIC2_DATA           equ     0xA1
+PIC_EOI             equ     0x20
+
+; Screen dimensions
+SCREEN_WIDTH        equ     80
+SCREEN_HEIGHT       equ     25
+SCREEN_PIXELS_X     equ     640
+SCREEN_PIXELS_Y     equ     200
+
+; Mouse button masks
+MOUSE_BTN_LEFT      equ     0x01
+MOUSE_BTN_RIGHT     equ     0x02
+MOUSE_BTN_MIDDLE    equ     0x04

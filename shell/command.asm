@@ -127,9 +127,23 @@ transient_start:
     mov     dx, int24_handler
     int     0x21
 
-    ; Check if AUTOEXEC.BAT exists and run it (Phase 8)
-    ; For now, skip batch processing
+    ; Check if AUTOEXEC.BAT exists and run it
+    mov     dx, autoexec_path
+    mov     ax, 0x3D00              ; Open read-only
+    int     0x21
+    jc      .no_autoexec            ; File doesn't exist
 
+    ; AUTOEXEC.BAT exists - close and execute
+    mov     bx, ax
+    mov     ah, 0x3E
+    int     0x21
+
+    ; Execute AUTOEXEC.BAT
+    mov     si, autoexec_path
+    mov     di, autoexec_args       ; Empty arguments
+    call    batch_execute
+
+.no_autoexec:
     ; Fall through to main command loop
 
 ; ---------------------------------------------------------------------------
@@ -619,8 +633,42 @@ try_external_cmd:
     int     0x21
     jnc     .exec_done
 
+    ; .EXE failed, try .BAT
+    mov     di, ext_filename
+.find_dot_bat:
+    cmp     byte [di], '.'
+    je      .change_to_bat
+    cmp     byte [di], 0
+    je      .not_found
+    inc     di
+    jmp     .find_dot_bat
+
+.change_to_bat:
+    mov     byte [di+1], 'B'
+    mov     byte [di+2], 'A'
+    mov     byte [di+3], 'T'
+
+    ; Check if .BAT file exists (try to open it)
+    push    cs
+    pop     ds
+    mov     dx, ext_filename
+    mov     ax, 0x3D00              ; Open read-only
+    int     0x21
+    jc      .not_found              ; .BAT not found either
+
+    ; .BAT file exists - close and execute as batch
+    mov     bx, ax
+    mov     ah, 0x3E
+    int     0x21
+
+    ; Call batch_execute with filename and arguments
+    mov     si, ext_filename        ; Batch file path
+    mov     di, [cmd_args]          ; Parameters pointer
+    call    batch_execute
+    jmp     .ext_ret                ; Done (batch sets its own errorlevel)
+
 .not_found:
-    ; Neither .COM nor .EXE found in current directory
+    ; Neither .COM, .EXE, nor .BAT found in current directory
     ; Try searching PATH
     call    search_path_for_cmd
     test    al, al
@@ -763,6 +811,52 @@ search_path_for_cmd:
     int     0x21
     jnc     .path_found
 
+    ; Try .BAT in this PATH directory
+    push    di
+    mov     di, ext_filename
+.find_dot_bat_path:
+    cmp     byte [di], '.'
+    je      .change_to_bat_path
+    cmp     byte [di], 0
+    je      .no_bat_path
+    inc     di
+    jmp     .find_dot_bat_path
+
+.change_to_bat_path:
+    mov     byte [di+1], 'B'
+    mov     byte [di+2], 'A'
+    mov     byte [di+3], 'T'
+    pop     di
+
+    ; Check if .BAT exists
+    push    cs
+    pop     ds
+    mov     dx, ext_filename
+    mov     ax, 0x3D00              ; Open read-only
+    int     0x21
+    jc      .try_next_path          ; Not found, try next PATH
+
+    ; .BAT found - close and execute
+    mov     bx, ax
+    mov     ah, 0x3E
+    int     0x21
+
+    pop     si                      ; Clean up saved PATH position
+    mov     si, ext_filename
+    mov     di, [cmd_args]
+    call    batch_execute
+
+    mov     al, 1                   ; Return success
+    pop     di
+    pop     si
+    pop     dx
+    pop     cx
+    pop     bx
+    ret
+
+.no_bat_path:
+    pop     di
+
 .try_next_path:
     pop     si                      ; Restore position in PATH
     ; If we stopped at NUL, we're done
@@ -876,6 +970,10 @@ prompt_path_buf times 68 db 0   ; Buffer for current path in prompt
 
 ; Messages
 msg_bad_cmd     db  'Bad command or file name', 0x0D, 0x0A, '$'
+
+; AUTOEXEC.BAT
+autoexec_path   db  'AUTOEXEC.BAT', 0
+autoexec_args   db  0               ; Empty arguments
 
 ; ---------------------------------------------------------------------------
 ; Include internal command implementations

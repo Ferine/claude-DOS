@@ -213,6 +213,17 @@ int21_35:
     call    dos_clear_error
     ret
 
+; AH=52h - Get List of Lists (SysVars pointer)
+; Output: ES:BX = pointer to DOS internal variable table
+; Note: [ES:BX-2] = first MCB segment (used by MEM utility)
+int21_52:
+    ; Return pointer to sysvars structure
+    ; The first MCB segment is stored at [sysvars - 2]
+    mov     word [save_es], cs
+    mov     word [save_bx], sysvars
+    call    dos_clear_error
+    ret
+
 ; AH=50h - Set PSP
 ; Input: BX = new PSP segment
 int21_50:

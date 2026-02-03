@@ -104,17 +104,20 @@ int20_handler:
     iret
 
 ; ---------------------------------------------------------------------------
-; install_int33 - Install INT 33h (mouse driver stub)
+; install_int33 - Install INT 33h (mouse driver)
 ; ---------------------------------------------------------------------------
 install_int33:
     push    es
     push    ax
 
+    ; Initialize PS/2 mouse hardware
+    call    mouse_init
+
     xor     ax, ax
     mov     es, ax
 
-    ; INT 33h vector at 0000:00CC
-    mov     word [es:0x00CC], int33_handler
+    ; INT 33h vector at 0000:00CC - point to full driver
+    mov     word [es:0x00CC], int33_handler_main
     mov     [es:0x00CE], cs
 
     pop     ax
@@ -356,24 +359,72 @@ int05_handler:
     iret
 
 ; ---------------------------------------------------------------------------
-; INT 06h handler - Invalid Opcode - always prints
+; INT 06h handler - Invalid Opcode - prints faulting CS:IP and halts
+; Stack frame on entry: [SP+0]=IP, [SP+2]=CS, [SP+4]=FLAGS
 ; ---------------------------------------------------------------------------
 int06_handler:
+    push    bp
+    mov     bp, sp
     push    ax
     push    bx
+    push    cx
+    push    dx
+
+    ; Print "#UD@"
+    mov     ah, 0x0E
+    xor     bx, bx
     mov     al, '#'
+    int     0x10
+    mov     al, 'U'
+    int     0x10
+    mov     al, 'D'
+    int     0x10
+    mov     al, '@'
+    int     0x10
+
+    ; Print CS (at [bp+4])
+    mov     ax, [bp+4]
+    call    .print_hex_word
+    mov     al, ':'
+    mov     ah, 0x0E
+    int     0x10
+
+    ; Print IP (at [bp+2])
+    mov     ax, [bp+2]
+    call    .print_hex_word
+
+    ; Print newline
+    mov     al, 0x0D
+    int     0x10
+    mov     al, 0x0A
+    int     0x10
+
+    ; Halt the system - can't continue from invalid opcode
+    cli
+    hlt
+
+.print_hex_word:
+    ; Print AX as 4 hex digits
+    push    ax
+    push    cx
+    mov     cx, 4
+.hex_loop:
+    rol     ax, 4
+    push    ax
+    and     al, 0x0F
+    add     al, '0'
+    cmp     al, '9'
+    jbe     .hex_digit
+    add     al, 7       ; 'A'-'9'-1
+.hex_digit:
     mov     ah, 0x0E
     xor     bx, bx
     int     0x10
-    mov     al, '0'
-    int     0x10
-    mov     al, '6'
-    int     0x10
-    mov     al, '#'
-    int     0x10
-    pop     bx
     pop     ax
-    iret
+    loop    .hex_loop
+    pop     cx
+    pop     ax
+    ret
 
 ; ---------------------------------------------------------------------------
 ; INT 0Dh handler - General Protection Fault - always prints

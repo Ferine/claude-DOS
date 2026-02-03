@@ -16,9 +16,14 @@ CHESS_FILES := $(CHESS_DIR)/CHESS.EXE $(CHESS_DIR)/ALLCANM1 $(CHESS_DIR)/ALLCANM
 # More43 utility (use unpacked version)
 MORE_EXE := tests/more43/bin/_MORE.EXE
 
-# Frogger game
-FROGGER_FILES := tests/Frogger/frogger.exe tests/Frogger/frogpant.ref
+# Frogger game (disabled for space)
+#FROGGER_FILES := tests/Frogger/frogger.exe tests/Frogger/frogpant.ref
+FROGGER_FILES :=
+
+# Batch test files
+BAT_FILES := $(wildcard tests/*.bat)
 FROGGER_DATOS := $(wildcard tests/Frogger/datos/*.ref tests/Frogger/datos/*.REF)
+
 
 FLOPPY   := $(IMGDIR)/floppy.img
 VBR_BIN  := $(IMGDIR)/vbr.bin
@@ -96,6 +101,12 @@ $(FLOPPY): $(VBR_BIN) $(STAGE2_BIN) $(IOSYS_BIN) $(COMMAND_BIN) $(UTIL_BINS) $(T
 	for f in $(CHESS_FILES) $(MORE_EXE) $(FROGGER_FILES); do \
 		if [ -f "$$f" ]; then \
 			NAME=$$(basename "$$f"); \
+			ARGS="$$ARGS $$f:$$NAME"; \
+		fi; \
+	done; \
+	for f in $(BAT_FILES); do \
+		if [ -f "$$f" ]; then \
+			NAME=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
 			ARGS="$$ARGS $$f:$$NAME"; \
 		fi; \
 	done; \

@@ -3,6 +3,26 @@
 ; ===========================================================================
 
 ; ---------------------------------------------------------------------------
+; List of Lists (SysVars) structure
+; INT 21h AH=52h returns pointer to 'sysvars'
+; First MCB segment is at [sysvars - 2] per DOS convention
+; ---------------------------------------------------------------------------
+sysvars_mcb_ptr     dw  0           ; First MCB segment (at sysvars - 2)
+sysvars:                            ; INT 21h AH=52h returns ES:BX pointing here
+    .dpb_ptr        dd  0           ; +00h: Pointer to first DPB
+    .sft_ptr        dd  0           ; +04h: Pointer to SFT
+    .clock_ptr      dd  0           ; +08h: Pointer to CLOCK$ device
+    .con_ptr        dd  0           ; +0Ch: Pointer to CON device
+    .max_bytes_sec  dw  512         ; +10h: Max bytes per sector
+    .disk_buf_ptr   dd  0           ; +12h: Pointer to disk buffer info
+    .cds_ptr        dd  0           ; +16h: Pointer to CDS array
+    .fcb_table_ptr  dd  0           ; +1Ah: Pointer to FCB table
+    .fcb_keep_count dw  0           ; +1Eh: FCB keep count
+    .block_devices  db  1           ; +20h: Number of block devices
+    .lastdrive      db  LASTDRIVE   ; +21h: LASTDRIVE value
+    ; (more fields exist in real DOS but we stop here)
+
+; ---------------------------------------------------------------------------
 ; System variables
 ; ---------------------------------------------------------------------------
 boot_drive          db  0           ; Boot drive number (from BIOS)

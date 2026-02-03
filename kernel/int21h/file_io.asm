@@ -1012,6 +1012,20 @@ int21_3F:
 
 ; AH=40h - Write file/device
 int21_40:
+    ; Debug: dump write info to serial
+    push    ax
+    push    dx
+    mov     dx, 0x3F8
+    mov     al, 'W'
+    out     dx, al
+    mov     al, [save_bx]       ; Handle
+    add     al, '0'
+    out     dx, al
+    mov     al, ':'
+    out     dx, al
+    pop     dx
+    pop     ax
+
     mov     bx, [save_bx]
     cmp     bx, STDOUT
     je      .write_stdout
@@ -1037,6 +1051,11 @@ int21_40:
     test    cx, cx
     jz      .stdout_done
     mov     al, [es:si]
+    ; Also output to serial for debugging
+    push    dx
+    mov     dx, 0x3F8
+    out     dx, al
+    pop     dx
     int     0x10
     inc     si
     dec     cx

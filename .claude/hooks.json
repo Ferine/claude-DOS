@@ -1,0 +1,28 @@
+{
+  "hooks": [
+    {
+      "matcher": {
+        "tool": "Edit",
+        "file_paths": ["**/*.asm", "**/*.inc"]
+      },
+      "hooks": [
+        {
+          "type": "afterToolResult",
+          "command": "if ! make 2>&1 | tee /tmp/claudedos-build.log | head -20; then echo ''; echo '=== Auto-Diagnosis ==='; grep -oE '##[0-9A-Fa-f]{2}##' /tmp/claudedos-build.log 2>/dev/null | sort -u | while read code; do ./scripts/diagnose.sh lookup $(echo $code | sed 's/##//g') 2>/dev/null; done; fi"
+        }
+      ]
+    },
+    {
+      "matcher": {
+        "tool": "Bash",
+        "command_pattern": "^make"
+      },
+      "hooks": [
+        {
+          "type": "afterToolResult",
+          "command": "if [ -f images/floppy.img ]; then SIZE=$(stat -f%z images/floppy.img 2>/dev/null || stat -c%s images/floppy.img); PCT=$((SIZE * 100 / 1474560)); if [ $SIZE -gt 1474560 ]; then echo \"ERROR: Floppy exceeds 1.44MB! ($SIZE bytes)\"; elif [ $PCT -gt 90 ]; then echo \"Floppy: $SIZE/1474560 bytes (${PCT}% full)\"; fi; fi"
+        }
+      ]
+    }
+  ]
+}

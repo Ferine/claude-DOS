@@ -291,7 +291,7 @@ int21_table:
     dw      int21_4F            ; 4Fh - Find next matching file
     dw      int21_50            ; 50h - Set PSP
     dw      int21_51            ; 51h - Get PSP
-    dw      0                   ; 52h - Get SysVars
+    dw      int21_52            ; 52h - Get SysVars (List of Lists)
     dw      0                   ; 53h - Reserved
     dw      0                   ; 54h - Get verify flag
     dw      0                   ; 55h - Reserved

@@ -5,7 +5,8 @@
 ; MCB chain starts after the kernel. Each MCB is a 16-byte paragraph header
 ; followed by the memory block (size in paragraphs).
 
-mcb_chain_start dw  0           ; Segment of first MCB
+; mcb_chain_start is now sysvars_mcb_ptr in data.asm
+mcb_chain_start equ sysvars_mcb_ptr  ; Alias for compatibility
 
 ; ---------------------------------------------------------------------------
 ; init_memory - Initialize the MCB chain
