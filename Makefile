@@ -99,12 +99,7 @@ $(FLOPPY): $(VBR_BIN) $(STAGE2_BIN) $(IOSYS_BIN) $(COMMAND_BIN) $(UTIL_BINS) $(T
 			ARGS="$$ARGS $$f:$$NAME"; \
 		fi; \
 	done; \
-	for f in $(FROGGER_DATOS); do \
-		if [ -f "$$f" ]; then \
-			NAME=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
-			ARGS="$$ARGS $$f:DATOS/$$NAME"; \
-		fi; \
-	done; \
+	@# Frogger data files excluded to save space \
 	echo "$(MKFLOPPY) $$ARGS"; \
 	$(MKFLOPPY) $$ARGS
 
