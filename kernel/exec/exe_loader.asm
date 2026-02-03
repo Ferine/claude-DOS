@@ -96,21 +96,34 @@ load_exe:
     ; if last_page_bytes == 0: total = page_count * 512
     ; else: total = (page_count - 1) * 512 + last_page_bytes
     ; Then subtract header_bytes to get actual load size
+    ; NOTE: Uses 32-bit arithmetic to support EXE files > 64KB
     mov     ax, [.page_count]
+    xor     dx, dx                  ; DX:AX = page_count (32-bit)
     cmp     word [.last_page_bytes], 0
     je      .full_page_calc
     dec     ax                      ; (page_count - 1)
 .full_page_calc:
-    mov     cl, 9
-    shl     ax, cl                  ; AX = pages * 512
+    ; Multiply by 512 using 32-bit shift (DX:AX << 9)
+    mov     cx, 9
+.shift_loop:
+    shl     ax, 1
+    rcl     dx, 1
+    loop    .shift_loop
+    ; DX:AX = pages * 512 (32-bit result)
     cmp     word [.last_page_bytes], 0
     je      .no_last_page_add
     add     ax, [.last_page_bytes]
+    adc     dx, 0                   ; Handle carry into high word
 .no_last_page_add:
-    ; AX = total EXE image size in bytes (including header)
-    sub     ax, [.header_bytes]     ; Subtract header to get load image size
+    ; DX:AX = total EXE image size in bytes (including header)
+    sub     ax, [.header_bytes]
+    sbb     dx, 0                   ; Handle borrow from high word
+    ; Store 32-bit bytes_to_load
     mov     [.bytes_to_load], ax
-    mov     word [.bytes_loaded], 0 ; Initialize bytes loaded counter
+    mov     [.bytes_to_load + 2], dx
+    ; Initialize 32-bit bytes_loaded counter
+    mov     word [.bytes_loaded], 0
+    mov     word [.bytes_loaded + 2], 0
 
     ; Load the file cluster by cluster
     ; - Skip .skip_sectors worth of sectors entirely
@@ -128,10 +141,15 @@ load_exe:
     cmp     ax, 0x0FF8
     jae     .load_done
 
-    ; Check if we've already loaded enough data
-    mov     cx, [.bytes_loaded]
+    ; Check if we've already loaded enough data (32-bit comparison)
+    mov     cx, [.bytes_loaded + 2]     ; High word of bytes_loaded
+    cmp     cx, [.bytes_to_load + 2]    ; Compare high words first
+    ja      .load_done                  ; loaded_high > to_load_high -> done
+    jb      .continue_loading           ; loaded_high < to_load_high -> continue
+    mov     cx, [.bytes_loaded]         ; High words equal, compare low words
     cmp     cx, [.bytes_to_load]
-    jae     .load_done              ; Stop when we've loaded the required amount
+    jae     .load_done                  ; Stop when we've loaded the required amount
+.continue_loading:
 
     push    ax                      ; Save cluster number
 
@@ -218,9 +236,10 @@ load_exe:
     ; After split, update destination and skip the wrap check
     ; (we already advanced ES during the split)
     mov     bx, di
-    ; Track bytes loaded
+    ; Track bytes loaded (32-bit addition)
     mov     ax, [.last_copy_size]
     add     [.bytes_loaded], ax
+    adc     word [.bytes_loaded + 2], 0  ; Handle carry into high word
     pop     dx
     pop     cx
     pop     di
@@ -241,11 +260,11 @@ load_exe:
     ; Update destination pointer
     mov     bx, di
 
-    ; Track bytes loaded (CX was bytes copied, but it's 0 after rep movsb)
-    ; We need to calculate from the difference in DI
-    ; Actually, we saved CX earlier - use [.last_copy_size]
+    ; Track bytes loaded (32-bit addition)
+    ; We saved CX earlier - use [.last_copy_size]
     mov     ax, [.last_copy_size]
     add     [.bytes_loaded], ax
+    adc     word [.bytes_loaded + 2], 0  ; Handle carry into high word
 
     pop     dx
     pop     cx
@@ -367,15 +386,22 @@ load_exe:
 
     ; Check segment is within loaded image bounds
     ; End segment = load_seg + (bytes_loaded >> 4) + 1
+    ; Note: bytes_loaded is 32-bit but we only need low 20 bits for segment calc
     push    dx
-    mov     dx, [.bytes_loaded]
-    shr     dx, 4                   ; Convert bytes to paragraphs
+    push    cx
+    mov     dx, [.bytes_loaded]         ; Low word
+    mov     cx, [.bytes_loaded + 2]     ; High word
+    ; Shift DX:CX right by 4 to get paragraphs (we only need low 16 bits result)
+    shr     dx, 4
+    shl     cx, 12                      ; Move low 4 bits of high word to high 4 bits
+    or      dx, cx                      ; Combine
     add     dx, [.load_seg]
-    inc     dx                      ; One past the end
+    inc     dx                          ; One past the end
+    pop     cx
     cmp     ax, [.load_seg]
-    jb      .reloc_skip_invalid     ; Before start of image
+    jb      .reloc_skip_invalid         ; Before start of image
     cmp     ax, dx
-    jae     .reloc_skip_invalid     ; Past end of image
+    jae     .reloc_skip_invalid         ; Past end of image
     pop     dx
 
     ; Also verify offset doesn't go past segment end (need room for word)
@@ -472,8 +498,8 @@ load_exe:
 .header_bytes      dw  0
 .page_count        dw  0
 .last_page_bytes   dw  0
-.bytes_to_load     dw  0           ; Total bytes to load (from MZ header)
-.bytes_loaded      dw  0           ; Bytes loaded so far
+.bytes_to_load     dd  0           ; Total bytes to load (from MZ header) - 32-bit
+.bytes_loaded      dd  0           ; Bytes loaded so far - 32-bit
 .last_copy_size    dw  0           ; Bytes copied in last operation
 .reloc_count       dw  0
 .reloc_offset      dw  0

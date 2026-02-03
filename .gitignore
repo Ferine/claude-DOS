@@ -5,3 +5,4 @@ tests/target/
 *.bin
 *.o
 .DS_Store
+/test_results
