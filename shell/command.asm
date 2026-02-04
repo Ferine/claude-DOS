@@ -177,9 +177,15 @@ cmd_loop:
     je      cmd_loop
 
     ; Null-terminate the command (replace CR with 0)
+    ; Also clear rest of buffer to prevent stale data issues
     xor     bh, bh
     mov     bl, [cmd_buffer + 1] ; Length
-    mov     byte [cmd_buffer + 2 + bx], 0
+    mov     di, cmd_buffer + 2
+    add     di, bx              ; DI = position of CR
+    mov     cx, 128
+    sub     cx, bx              ; CX = remaining bytes to clear
+    xor     al, al
+    rep     stosb               ; Clear from CR to end of buffer
 
     ; Parse redirection operators (>, >>, <)
     call    parse_redirection
