@@ -29,8 +29,7 @@ cmd_date:
     jae     .skip_dow
     xor     ah, ah
     mov     bx, ax
-    shl     bx, 1
-    shl     bx, 1               ; *4 for string table offset
+    shl     bx, 1               ; *2 for word table offset
     add     bx, date_dow_table
     mov     dx, [bx]
     mov     ah, 0x09
