@@ -40,10 +40,17 @@ int21_01:
 ; ---------------------------------------------------------------------------
 int21_02:
     mov     al, [save_dx]       ; DL from caller
+    cmp     al, BEL_CHAR        ; Check for bell character
+    jne     .normal_output
+    call    speaker_beep        ; Sound the beeper
+    jmp     .done
+.normal_output:
     mov     ah, 0x0E
     xor     bx, bx
     int     0x10
+.done:
     ; Return character in AL
+    mov     al, [save_dx]
     mov     byte [save_ax], al
     call    dos_clear_error
     ret
@@ -77,10 +84,17 @@ int21_06:
     cmp     al, 0xFF
     je      .input
 
-    ; Output character
+    ; Output character - check for bell
+    cmp     al, BEL_CHAR
+    jne     .output_char
+    call    speaker_beep
+    jmp     .output_done
+.output_char:
     mov     ah, 0x0E
     xor     bx, bx
     int     0x10
+.output_done:
+    mov     al, [save_dx]
     mov     byte [save_ax], al
     ret
 
@@ -142,13 +156,19 @@ int21_09:
     mov     es, [save_ds]       ; Get caller's DS
     mov     si, [save_dx]       ; Get caller's DX
 
-    mov     ah, 0x0E
     xor     bx, bx
 .print_loop:
     mov     al, [es:si]
     cmp     al, '$'
     je      .print_done
+    cmp     al, BEL_CHAR        ; Check for bell character
+    jne     .print_char
+    call    speaker_beep        ; Sound the beeper
+    jmp     .print_next
+.print_char:
+    mov     ah, 0x0E
     int     0x10
+.print_next:
     inc     si
     jmp     .print_loop
 .print_done:
@@ -320,6 +340,51 @@ int21_2F:
     mov     ax, [current_dta_off]
     mov     [save_bx], ax
     call    dos_clear_error
+    ret
+
+; ---------------------------------------------------------------------------
+; speaker_beep - Sound the PC speaker with a short beep
+; Preserves all registers
+; ---------------------------------------------------------------------------
+speaker_beep:
+    push    ax
+    push    bx
+    push    cx
+
+    ; Program PIT timer channel 2 for square wave
+    mov     al, 0xB6                ; Channel 2, lobyte/hibyte, mode 3
+    out     0x43, al
+
+    ; Set frequency to 880 Hz (divisor = 1193182/880 = 1355 = 0x054B)
+    mov     al, 0x4B                ; Low byte
+    out     0x42, al
+    mov     al, 0x05                ; High byte
+    out     0x42, al
+
+    ; Read current port 61h state, enable speaker
+    in      al, 0x61
+    mov     ah, al                  ; Save original in AH
+    or      al, 0x03                ; Set bits 0,1: timer gate + speaker enable
+    out     0x61, al
+
+    ; Delay using timer ticks (read port 0x40 for timing)
+    mov     bx, 5                   ; Number of 55ms ticks (~275ms total)
+.wait_tick:
+    ; Wait for timer channel 0 to wrap (reads decrement)
+    mov     cx, 0xFFFF
+.inner_delay:
+    in      al, 0x40                ; Read timer - adds delay
+    loop    .inner_delay
+    dec     bx
+    jnz     .wait_tick
+
+    ; Restore port 61h (disable speaker)
+    mov     al, ah
+    out     0x61, al
+
+    pop     cx
+    pop     bx
+    pop     ax
     ret
 
 ; ---------------------------------------------------------------------------

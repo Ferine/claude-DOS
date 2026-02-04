@@ -9,9 +9,14 @@ KERNDIR  := kernel
 SHELLDIR := shell
 UTILDIR  := utils
 
-# Battle Chess game files
-CHESS_DIR := tests/battle_chess
-CHESS_FILES := $(CHESS_DIR)/CHESS.EXE $(CHESS_DIR)/ALLCANM1 $(CHESS_DIR)/ALLCANM2
+# Battle Chess game files (disabled for space)
+#CHESS_DIR := tests/battle_chess
+#CHESS_FILES := $(CHESS_DIR)/CHESS.EXE $(CHESS_DIR)/ALLCANM1 $(CHESS_DIR)/ALLCANM2
+CHESS_FILES :=
+
+# Defender of the Crown (EGA version)
+DEFCROWN_DIR := tests/defcrown/ega
+DEFCROWN_FILES := $(DEFCROWN_DIR)/DEFENDER.COM $(DEFCROWN_DIR)/GAME.DAT
 
 # More43 utility (use unpacked version)
 MORE_EXE := tests/more43/bin/_MORE.EXE
@@ -98,7 +103,7 @@ $(FLOPPY): $(VBR_BIN) $(STAGE2_BIN) $(IOSYS_BIN) $(COMMAND_BIN) $(UTIL_BINS) $(T
 		NAME=$$(basename "$$f"); \
 		ARGS="$$ARGS $$f:$$NAME"; \
 	done; \
-	for f in $(CHESS_FILES) $(MORE_EXE) $(FROGGER_FILES); do \
+	for f in $(CHESS_FILES) $(DEFCROWN_FILES) $(MORE_EXE) $(FROGGER_FILES); do \
 		if [ -f "$$f" ]; then \
 			NAME=$$(basename "$$f"); \
 			ARGS="$$ARGS $$f:$$NAME"; \
@@ -115,14 +120,17 @@ $(FLOPPY): $(VBR_BIN) $(STAGE2_BIN) $(IOSYS_BIN) $(COMMAND_BIN) $(UTIL_BINS) $(T
 	$(MKFLOPPY) $$ARGS
 
 # --- Run ---
+# Audio config for PC speaker on macOS
+AUDIO_OPTS := -audiodev coreaudio,id=audio0 -machine pcspk-audiodev=audio0
+
 run: floppy
-	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -display cocoa
+	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -display cocoa $(AUDIO_OPTS)
 
 run-serial: floppy
-	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -nographic -serial mon:stdio
+	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -nographic -serial mon:stdio $(AUDIO_OPTS)
 
 debug: floppy
-	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -S -s -display cocoa &
+	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -S -s -display cocoa $(AUDIO_OPTS) &
 	@echo "GDB: target remote :1234 / set architecture i8086 / break *0x7c00"
 
 # --- Clean ---

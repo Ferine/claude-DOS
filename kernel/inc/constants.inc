@@ -218,3 +218,12 @@ SCREEN_PIXELS_Y     equ     200
 MOUSE_BTN_LEFT      equ     0x01
 MOUSE_BTN_RIGHT     equ     0x02
 MOUSE_BTN_MIDDLE    equ     0x04
+
+; PC Speaker / Timer constants
+TIMER_CTRL_PORT     equ     0x43        ; 8253/8254 timer control port
+TIMER_CH2_PORT      equ     0x42        ; Timer channel 2 data port
+SPEAKER_PORT        equ     0x61        ; Speaker control port (8255 PPI)
+TIMER_CH2_MODE3     equ     0xB6        ; Channel 2, lobyte/hibyte, mode 3 (square wave)
+BEEP_FREQUENCY      equ     880         ; Default beep frequency (Hz) - A5 note
+BEEP_DIVISOR        equ     1193182 / BEEP_FREQUENCY  ; Timer divisor for beep
+BEL_CHAR            equ     0x07        ; Bell character (Ctrl+G)
