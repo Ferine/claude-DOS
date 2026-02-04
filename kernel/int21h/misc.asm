@@ -69,15 +69,79 @@ int21_2A:
     call    bcd_to_bin
     mov     [save_dx], al           ; DL = day
 
-    ; Calculate day of week (simplified Zeller's formula)
-    ; For simplicity, just return 0 (Sunday) - full calculation would be complex
-    ; A proper implementation would use Zeller's congruence
-    mov     byte [save_ax], 0       ; AL = day of week (0=Sunday)
+    ; Calculate day of week using Sakamoto's algorithm
+    ; dow = (year + year/4 - year/100 + year/400 + t[month-1] + day) % 7
+    ; For Jan/Feb, use previous year
+    ; t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4}
+
+    ; Use temp storage to simplify
+    mov     ax, [save_cx]           ; AX = year
+    mov     [.dow_year], ax
+    xor     ah, ah
+    mov     al, [save_dx + 1]       ; AL = month
+    mov     [.dow_month], al
+    mov     al, [save_dx]           ; AL = day
+    mov     [.dow_day], al
+
+    ; If month < 3, decrement year
+    cmp     byte [.dow_month], 3
+    jae     .dow_no_adj
+    dec     word [.dow_year]
+.dow_no_adj:
+
+    ; Start sum with day
+    xor     ax, ax
+    mov     al, [.dow_day]
+    mov     [.dow_sum], ax
+
+    ; Add year
+    mov     ax, [.dow_year]
+    add     [.dow_sum], ax
+
+    ; Add year/4
+    mov     ax, [.dow_year]
+    shr     ax, 2
+    add     [.dow_sum], ax
+
+    ; Subtract year/100
+    mov     ax, [.dow_year]
+    xor     dx, dx
+    mov     bx, 100
+    div     bx
+    sub     [.dow_sum], ax
+
+    ; Add year/400
+    mov     ax, [.dow_year]
+    xor     dx, dx
+    mov     bx, 400
+    div     bx
+    add     [.dow_sum], ax
+
+    ; Add t[month-1]
+    xor     bx, bx
+    mov     bl, [.dow_month]
+    dec     bl
+    mov     al, [.dow_table + bx]
+    xor     ah, ah
+    add     [.dow_sum], ax
+
+    ; sum mod 7
+    mov     ax, [.dow_sum]
+    xor     dx, dx
+    mov     bx, 7
+    div     bx
+    mov     [save_ax], dl           ; DL = day of week (0=Sunday)
 
     pop     si
     pop     bx
     call    dos_clear_error
     ret
+
+.dow_year   dw  0
+.dow_month  db  0
+.dow_day    db  0
+.dow_sum    dw  0
+.dow_table  db  0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4
 
 .date_rtc_fail:
     ; RTC not available - return a default date

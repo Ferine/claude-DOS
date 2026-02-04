@@ -106,8 +106,9 @@ int21_4B:
     cmp     byte [exec_is_exe], 1
     je      .exe_size
 
-    ; .COM: allocate 0x1000 paragraphs (64K) if available, or max available
-    mov     bx, 0x1000              ; 64K in paragraphs
+    ; .COM: allocate ALL available memory (standard DOS behavior)
+    ; Programs can shrink their allocation with INT 21h/4Ah if needed
+    mov     bx, 0xFFFF              ; Request maximum
     jmp     .do_alloc
 
 .exe_size:
@@ -192,9 +193,8 @@ int21_4B:
     jmp     .do_alloc
 
 .use_max_mem:
-    ; Request a large amount (0x1000 = 64K paragraphs = 1MB) to get all available
-    ; mcb_alloc will give us the largest available block
-    mov     bx, 0x1000              ; Request 64K paragraphs (1MB)
+    ; Request maximum memory - mcb_alloc will return largest available in BX if it fails
+    mov     bx, 0xFFFF              ; Request max paragraphs
     jmp     .do_alloc
 
 .exe_size_error:
@@ -283,8 +283,15 @@ int21_4B:
 .skip_alloc_debug:
 
     ; Allocate memory for child
+    ; If request fails, mcb_alloc returns largest available in BX - retry with that
+    call    mcb_alloc
+    jnc     .alloc_ok
+    ; First attempt failed - BX now has largest available, retry
+    test    bx, bx
+    jz      .exec_no_mem_free_env   ; No memory at all
     call    mcb_alloc
     jc      .exec_no_mem_free_env
+.alloc_ok:
 
     ; DEBUG: print returned segment
     cmp     byte [cs:debug_trace], 0
@@ -338,17 +345,10 @@ int21_4B:
     call    build_psp
     pop     ds                      ; DS = kernel
 
-    ; Set PSP memory top (offset 0x02) to end of allocated block
-    ; MCB is at (exec_child_seg - 1), size is at MCB offset 3
-
-    push    ds
-    mov     ax, [cs:exec_child_seg]
-    dec     ax                      ; AX = MCB segment
-    mov     ds, ax
-    mov     ax, [ds:3]              ; MCB size
-    pop     ds
-    add     ax, [cs:exec_child_seg] ; AX = end of block (segment after last paragraph)
-    mov     [es:0x02], ax           ; Set PSP memory top
+    ; Set PSP memory top (offset 0x02) to top of conventional memory
+    ; DOS programs expect all memory from PSP to top of conventional RAM
+    ; Hardcode to 0xA000 (640KB) for maximum compatibility
+    mov     word [es:0x02], 0xA000  ; Set PSP memory top to 640KB boundary
 
     ; Save parent's INT 22h/23h/24h vectors into child PSP
     push    es

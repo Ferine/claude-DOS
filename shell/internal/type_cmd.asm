@@ -15,11 +15,12 @@ cmd_type:
     int     0x21
     jc      .not_found
 
-    mov     bx, ax              ; File handle
+    mov     [type_handle], ax   ; Save file handle
 
     ; Read and display loop
 .read_loop:
     mov     ah, 0x3F
+    mov     bx, [type_handle]   ; File handle
     mov     cx, 512
     mov     dx, type_buf
     int     0x21
@@ -36,6 +37,7 @@ cmd_type:
     jmp     .read_loop
 
 .close:
+    mov     bx, [type_handle]
     mov     ah, 0x3E
     int     0x21
     jmp     .done
@@ -57,4 +59,5 @@ cmd_type:
 
 type_err_msg    db  'File not found', 0x0D, 0x0A, '$'
 type_syntax_msg db  'Required parameter missing', 0x0D, 0x0A, '$'
+type_handle     dw  0
 type_buf        times 512 db 0
