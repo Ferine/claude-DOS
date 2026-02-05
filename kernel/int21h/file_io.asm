@@ -1138,7 +1138,7 @@ int21_40:
     ; >= 0xFF8 (FAT12) or 0xFFF8 (FAT16) means end of chain
     cmp     ax, 2
     jb      .write_need_cluster     ; Clusters 0,1 = need to allocate
-    cmp     ax, [fat_eoc_min]
+    cmp     ax, [cs:fat_eoc_min]
     jb      .write_have_cluster     ; Valid cluster in range
     ; Fall through to allocate (end of chain or invalid)
 
@@ -1163,7 +1163,7 @@ int21_40:
     ; Clusters 0 and 1 are reserved, so if cur_cluster < 2, it's a new file
     cmp     ax, 2
     jb      .write_first_cluster
-    cmp     ax, [fat_eoc_min]
+    cmp     ax, [cs:fat_eoc_min]
     jae     .write_first_cluster
     ; Not first - link previous cluster to new one
     push    cx
@@ -1198,6 +1198,7 @@ int21_40:
     push    cs
     pop     ds
     mov     ax, [cs:bp + SFT_ENTRY.cur_cluster]
+
     push    cs
     pop     es
     mov     bx, disk_buffer
