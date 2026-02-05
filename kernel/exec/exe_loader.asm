@@ -138,7 +138,7 @@ load_exe:
     mov     byte [.first_data_sector], 1  ; Flag: next non-skipped sector is first
 
 .load_loop:
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .load_done
 
     ; Check if we've already loaded enough data (32-bit comparison)
@@ -326,7 +326,7 @@ load_exe:
     push    bx
     call    fat_get_next_cluster
     pop     bx
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .read_error             ; Unexpected EOF
     dec     bx
     jnz     .reloc_skip_cluster
@@ -360,7 +360,7 @@ load_exe:
     push    cx
     mov     ax, [.reloc_cur_cluster]
     call    fat_get_next_cluster
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .reloc_eof_pop          ; Unexpected EOF
     mov     [.reloc_cur_cluster], ax
 
@@ -402,7 +402,7 @@ load_exe:
     ; Read next sector
     mov     ax, [.reloc_cur_cluster]
     call    fat_get_next_cluster
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     pop     cx                      ; Restore reloc count
     jae     .reloc_eof              ; Unexpected EOF
     mov     [.reloc_cur_cluster], ax

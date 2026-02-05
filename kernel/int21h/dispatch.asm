@@ -100,7 +100,13 @@ int21_handler:
     shl     si, 1
     mov     si, [int21_table + si]
     pop     ax
+    ; Save active drive state (handlers may switch drives via resolve_path)
+    call    fat_save_drive
+
     call    si
+
+    ; Restore active drive state after handler
+    call    fat_restore_drive
 
     ; Handler has returned. Results are in the save area.
     jmp     .return

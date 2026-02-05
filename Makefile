@@ -55,7 +55,9 @@ EXTRA_FILES := $(wildcard $(IMGDIR)/*.EXE)
 $(IMGDIR)/%.com: tests/%.asm $(wildcard $(KERNDIR)/inc/*.inc) | $(IMGDIR)
 	$(NASM) -f bin $(KERN_INC) -o $@ $<
 
-.PHONY: all floppy run run-serial debug clean tools
+HD_IMG   := $(IMGDIR)/hd.img
+
+.PHONY: all floppy hd run run-serial run-hd run-hd-serial debug clean tools
 
 all: floppy
 
@@ -119,6 +121,18 @@ $(FLOPPY): $(VBR_BIN) $(STAGE2_BIN) $(IOSYS_BIN) $(COMMAND_BIN) $(UTIL_BINS) $(T
 	echo "$(MKFLOPPY) $$ARGS"; \
 	$(MKFLOPPY) $$ARGS
 
+# --- Hard Disk Image (FAT16, 32MB) ---
+hd: $(HD_IMG)
+
+$(HD_IMG): $(UTIL_BINS) $(TEST_BINS) $(MKFLOPPY) | $(IMGDIR)
+	@ARGS="--hd $(HD_IMG)"; \
+	for f in $(UTIL_BINS) $(TEST_BINS); do \
+		NAME=$$(basename "$$f" | tr 'a-z' 'A-Z'); \
+		ARGS="$$ARGS $$f:$$NAME"; \
+	done; \
+	echo "$(MKFLOPPY) $$ARGS"; \
+	$(MKFLOPPY) $$ARGS
+
 # --- Run ---
 # Audio config for PC speaker on macOS
 AUDIO_OPTS := -audiodev coreaudio,id=audio0 -machine pcspk-audiodev=audio0
@@ -128,6 +142,12 @@ run: floppy
 
 run-serial: floppy
 	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -nographic -serial mon:stdio $(AUDIO_OPTS)
+
+run-hd: floppy hd
+	$(QEMU) -fda $(FLOPPY) -hda $(HD_IMG) -boot a -m 4 -display cocoa $(AUDIO_OPTS)
+
+run-hd-serial: floppy hd
+	$(QEMU) -fda $(FLOPPY) -hda $(HD_IMG) -boot a -m 4 -nographic -serial mon:stdio $(AUDIO_OPTS)
 
 debug: floppy
 	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -S -s -display cocoa $(AUDIO_OPTS) &

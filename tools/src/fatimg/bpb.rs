@@ -58,8 +58,44 @@ impl BiosParameterBlock {
         self.root_dir_start_sector() + self.root_dir_sectors()
     }
 
+    pub fn total_sectors(&self) -> u32 {
+        if self.total_sectors_16 != 0 {
+            self.total_sectors_16 as u32
+        } else {
+            self.total_sectors_32
+        }
+    }
+
     pub fn total_data_clusters(&self) -> u16 {
-        (self.total_sectors_16 - self.data_start_sector()) / self.sectors_per_cluster as u16
+        ((self.total_sectors() - self.data_start_sector() as u32) / self.sectors_per_cluster as u32) as u16
+    }
+
+    /// 32MB hard disk BPB (FAT16, 65536 sectors, 1 sector/cluster)
+    pub fn hard_disk_32mb() -> Self {
+        // 32MB = 65536 sectors * 512 bytes
+        // CHS: 63 spt * 16 heads * 65 cylinders = 65520 (close to 65536)
+        // Use total_sectors_16 = 0, total_sectors_32 = 65536
+        // FAT16 with 1 sec/cluster: 256 sectors per FAT (65536 entries * 2 bytes / 512)
+        // Root dir: 512 entries = 32 sectors
+        Self {
+            bytes_per_sector: 512,
+            sectors_per_cluster: 1,
+            reserved_sectors: 1,
+            num_fats: 2,
+            root_entry_count: 512,
+            total_sectors_16: 0,        // Use 32-bit field
+            media_type: 0xF8,           // Hard disk
+            fat_size_16: 256,
+            sectors_per_track: 63,
+            num_heads: 16,
+            hidden_sectors: 0,
+            total_sectors_32: 65536,
+            drive_number: 0x80,         // First hard disk
+            boot_signature: 0x29,
+            volume_id: 0x434C4448,      // "CLDH"
+            volume_label: *b"CLAUDEDOS C",
+            fs_type: *b"FAT16   ",
+        }
     }
 
     /// Serialize BPB to bytes (offset 11..62 in boot sector)

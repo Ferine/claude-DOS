@@ -50,9 +50,8 @@ int21_39:
     test    ax, ax
     jnz     .mkdir_scan_subdir
 
-    ; Parent is root directory - scan sectors 19-32
-    mov     ax, 19
-    mov     cx, 14
+    ; Parent is root directory - scan from DPB
+    call    fat_get_root_params ; AX = root_start, CX = root_sectors
 .mkdir_scan_root:
     push    cx
     push    ax
@@ -121,7 +120,7 @@ int21_39:
     mov     ax, dx
     call    fat_get_next_cluster
     mov     dx, ax
-    cmp     dx, 0x0FF8
+    cmp     dx, [fat_eoc_min]
     jb      .mkdir_subdir_loop
     jmp     .mkdir_dir_full
 
@@ -409,7 +408,7 @@ int21_3A:
     ; Need to check next cluster if exists
     mov     ax, [.rmdir_dir_cluster]
     call    fat_get_next_cluster
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .rmdir_is_empty         ; No more clusters - directory is empty
 
     ; More clusters to check - they should all be empty
@@ -714,12 +713,18 @@ int21_4E:
 
     ; AX = directory cluster to search
     mov     [search_dir_cluster], ax
+    ; Save which drive this search is on
+    mov     bl, [active_drive_num]
+    mov     [search_drive], bl
     jmp     .ff_setup_search
 
 .ff_use_current:
     ; Use current directory
     mov     ax, [current_dir_cluster]
     mov     [search_dir_cluster], ax
+    ; Save current drive for search
+    mov     bl, [active_drive_num]
+    mov     [search_drive], bl
     ; fcb_name_buffer might be wrong, re-convert from path_buffer
     mov     si, path_buffer
     call    ff_name_to_pattern
@@ -737,8 +742,13 @@ int21_4E:
     test    ax, ax
     jnz     .ff_subdir_search
 
-    ; Root directory: start at sector 19, entry 0
-    mov     word [search_dir_sector], 19
+    ; Root directory: start at root_start, entry 0
+    push    cx
+    call    fat_get_root_params     ; AX = root_start, CX = root_sectors
+    mov     [search_dir_sector], ax
+    add     ax, cx                  ; AX = root_start + root_sectors = end sector
+    mov     [ff_root_end], ax
+    pop     cx
     mov     word [search_dir_index], 0
     mov     word [search_dir_cluster], 0
     jmp     ff_search_loop
@@ -781,7 +791,22 @@ int21_4F:
     ; Get search_dir_cluster
     lodsw
     mov     [cs:search_dir_cluster], ax
+    ; Get search drive (BIOS drive number, byte 18)
+    lodsb
+    mov     [cs:search_drive], al
     pop     ds                      ; DS = kernel seg
+
+    ; Switch to the correct drive for this search
+    ; Convert BIOS drive number to logical: 0->0(A:), 0x80->2(C:)
+    mov     al, [search_drive]
+    cmp     al, 0x80
+    jne     .fn_not_hd
+    mov     al, 2                   ; C:
+    jmp     .fn_set_drive
+.fn_not_hd:
+    ; AL already = 0 for A:, 3 for D: etc.
+.fn_set_drive:
+    call    fat_set_active_drive
 
 ff_search_loop:
     ; Check if searching root or subdirectory
@@ -789,9 +814,9 @@ ff_search_loop:
     test    ax, ax
     jnz     .ff_subdir_loop
 
-    ; Root directory: check if exhausted (14 sectors, starting at 19)
+    ; Root directory: check if exhausted
     mov     ax, [search_dir_sector]
-    cmp     ax, 33                  ; 19 + 14 = 33
+    cmp     ax, [ff_root_end]
     jae     .ff_no_more
 
     ; Read current root directory sector
@@ -805,7 +830,7 @@ ff_search_loop:
 .ff_subdir_loop:
     ; Subdirectory: read cluster and search
     mov     ax, [search_dir_cluster]
-    cmp     ax, 0x0FF8              ; End of chain?
+    cmp     ax, [fat_eoc_min]       ; End of chain?
     jae     .ff_no_more
 
     ; Convert cluster to sector and read
@@ -931,8 +956,11 @@ ff_search_loop:
     stosw
     mov     ax, [search_dir_cluster]
     stosw
+    ; Byte 18: search drive (BIOS drive number)
+    mov     al, [search_drive]
+    stosb
     ; Fill remaining reserved bytes
-    mov     cx, 4
+    mov     cx, 3
     xor     al, al
     rep     stosb
     pop     di
@@ -987,6 +1015,9 @@ ff_search_loop:
     pop     es
     mov     ax, ERR_READ_FAULT
     jmp     dos_set_error
+
+; Local variable for FindFirst root directory end sector
+ff_root_end    dw  33              ; Default: 19 + 14 = 33 for FAT12 floppy
 
 ; ---------------------------------------------------------------------------
 ; ff_name_to_pattern - Convert ASCIIZ filespec to FCB pattern with wildcards

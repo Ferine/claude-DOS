@@ -122,6 +122,15 @@ fat_spt             dw  18          ; Sectors per track (1.44MB floppy)
 fat_heads           dw  2           ; Number of heads
 
 ; ---------------------------------------------------------------------------
+; Active drive state (for multi-drive FAT access)
+; ---------------------------------------------------------------------------
+active_dpb          dw  dpb_a       ; Pointer to currently active DPB
+active_drive_num    db  0           ; BIOS drive number for active drive (0=A:, 0x80=C:)
+fat_eoc_min         dw  0x0FF8      ; Minimum end-of-chain value for active FAT type
+fat_eoc_mark        dw  0x0FFF      ; End-of-chain marker to write for active FAT type
+fat_buffer_drive    db  0xFF        ; Drive owning cached FAT sector (0xFF=none)
+
+; ---------------------------------------------------------------------------
 ; XMS (Extended Memory Specification) State
 ; ---------------------------------------------------------------------------
 xms_installed       db  1           ; XMS available (always 1 for claudeDOS)
@@ -204,3 +213,28 @@ dpb_ramdisk:
     .first_free     dw  2
     .free_count     dw  0xFFFF
     .fat_type       db  12          ; FAT12
+
+; ---------------------------------------------------------------------------
+; Disk Parameter Block (DPB) for hard disk (drive C:)
+; Populated at boot if hard disk detected; defaults for 32MB FAT16
+; ---------------------------------------------------------------------------
+dpb_c:
+    .drive          db  2           ; Drive number (2=C:)
+    .unit           db  0           ; Unit number
+    .bytes_per_sec  dw  512
+    .sec_per_clus   db  0           ; Sectors per cluster - 1 (1 sec/clus => 0)
+    .clus_shift     db  0           ; Log2(sectors per cluster)
+    .rsvd_sectors   dw  1
+    .num_fats       db  2
+    .root_entries   dw  512
+    .data_start     dw  545         ; 1 + 256*2 + 32 = 545
+    .max_cluster    dw  0           ; Filled at init (0 = not present)
+    .fat_size       dw  256         ; Sectors per FAT
+    .root_start     dw  513         ; 1 + 256*2 = 513
+    .device_ptr     dd  0
+    .media_byte     db  0xF8        ; Hard disk media byte
+    .access_flag    db  0
+    .next_dpb       dd  0
+    .first_free     dw  2
+    .free_count     dw  0xFFFF
+    .fat_type       db  16          ; FAT16

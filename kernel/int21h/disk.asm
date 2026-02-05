@@ -31,25 +31,29 @@ int21_36:
 
     ; TODO: Handle drive selection from DL (currently only supports default drive)
 
-    ; Get values from DPB
+    ; Get values from DPB via active_dpb pointer
+    push    bx
+    mov     bx, [active_dpb]
+
     ; AX = sectors per cluster (sec_per_clus is stored as value-1)
     xor     ah, ah
-    mov     al, [dpb_a.sec_per_clus]
+    mov     al, [bx + DPB_SEC_PER_CLUS]
     inc     ax                          ; Convert from 0-based to actual count
     mov     [save_ax], ax
 
     ; CX = bytes per sector
-    mov     ax, [dpb_a.bytes_per_sec]
+    mov     ax, [bx + DPB_BYTES_PER_SEC]
     mov     [save_cx], ax
 
     ; DX = total data clusters = max_cluster - 2 (clusters 0,1 are reserved)
-    mov     ax, [dpb_a.max_cluster]
+    mov     ax, [bx + DPB_MAX_CLUSTER]
     sub     ax, 2
     mov     [save_dx], ax
 
     ; BX = free clusters - need to count by walking FAT
     ; Check if we have a cached count
-    mov     ax, [dpb_a.free_count]
+    mov     ax, [bx + DPB_FREE_COUNT]
+    pop     bx
     cmp     ax, 0xFFFF
     jne     .use_cached                 ; Use cached count if valid
 
@@ -58,7 +62,10 @@ int21_36:
     mov     si, 2                       ; SI = current cluster (start at 2)
 
 .count_loop:
-    cmp     si, [dpb_a.max_cluster]
+    push    bx
+    mov     bx, [active_dpb]
+    cmp     si, [bx + DPB_MAX_CLUSTER]
+    pop     bx
     jae     .count_done
 
     ; Get FAT entry for cluster SI
@@ -75,7 +82,10 @@ int21_36:
 
 .count_done:
     mov     ax, di                      ; AX = free count
-    mov     [dpb_a.free_count], ax      ; Cache the result
+    push    bx
+    mov     bx, [active_dpb]
+    mov     [bx + DPB_FREE_COUNT], ax   ; Cache the result
+    pop     bx
 
 .use_cached:
     mov     [save_bx], ax               ; BX = free clusters

@@ -219,6 +219,28 @@ MOUSE_BTN_LEFT      equ     0x01
 MOUSE_BTN_RIGHT     equ     0x02
 MOUSE_BTN_MIDDLE    equ     0x04
 
+; DPB field offsets (for indirect access via pointer)
+DPB_DRIVE           equ     0
+DPB_UNIT            equ     1
+DPB_BYTES_PER_SEC   equ     2
+DPB_SEC_PER_CLUS    equ     4
+DPB_CLUS_SHIFT      equ     5
+DPB_RSVD_SECTORS    equ     6
+DPB_NUM_FATS        equ     8
+DPB_ROOT_ENTRIES    equ     9
+DPB_DATA_START      equ     11
+DPB_MAX_CLUSTER     equ     13
+DPB_FAT_SIZE        equ     15
+DPB_ROOT_START      equ     17
+DPB_DEVICE_PTR      equ     19
+DPB_MEDIA_BYTE      equ     23
+DPB_ACCESS_FLAG     equ     24
+DPB_NEXT_DPB        equ     25
+DPB_FIRST_FREE      equ     29
+DPB_FREE_COUNT      equ     31
+DPB_FAT_TYPE        equ     33
+DPB_SIZE            equ     34
+
 ; PC Speaker / Timer constants
 TIMER_CTRL_PORT     equ     0x43        ; 8253/8254 timer control port
 TIMER_CH2_PORT      equ     0x42        ; Timer channel 2 data port

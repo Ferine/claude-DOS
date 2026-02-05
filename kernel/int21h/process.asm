@@ -72,6 +72,21 @@ int21_4B:
     pop     di
     pop     si
 
+    ; Switch to correct drive based on filename path
+    mov     si, exec_filename
+    cmp     byte [si + 1], ':'
+    jne     .exec_no_drive
+    mov     al, [si]
+    cmp     al, 'a'
+    jb      .exec_drive_upper
+    cmp     al, 'z'
+    ja      .exec_drive_upper
+    sub     al, 0x20
+.exec_drive_upper:
+    sub     al, 'A'             ; AL = drive number
+    call    fat_set_active_drive
+.exec_no_drive:
+
     ; Find the file to get its size
     mov     si, exec_fcb_name
     call    fat_find_in_root

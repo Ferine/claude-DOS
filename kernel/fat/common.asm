@@ -3,9 +3,101 @@
 ; ===========================================================================
 
 ; ---------------------------------------------------------------------------
+; fat_set_active_drive - Switch FAT operations to a different drive
+; Input: AL = drive number (0=A:, 2=C:)
+; Clobbers: BX
+; ---------------------------------------------------------------------------
+fat_set_active_drive:
+    push    ax
+
+    cmp     al, 2
+    je      .set_drive_c
+    cmp     al, 3
+    je      .set_drive_d
+
+    ; Default: drive A:
+    mov     word [active_dpb], dpb_a
+    mov     byte [active_drive_num], 0      ; BIOS drive 0 = floppy A:
+    mov     word [fat_eoc_min], 0x0FF8
+    mov     word [fat_eoc_mark], 0x0FFF
+    mov     word [fat_spt], 18
+    mov     word [fat_heads], 2
+    jmp     .set_done
+
+.set_drive_c:
+    mov     word [active_dpb], dpb_c
+    mov     byte [active_drive_num], 0x80   ; BIOS drive 80h = first HD
+    mov     word [fat_eoc_min], 0xFFF8
+    mov     word [fat_eoc_mark], 0xFFFF
+    mov     word [fat_spt], 63
+    mov     word [fat_heads], 16
+    jmp     .set_done
+
+.set_drive_d:
+    mov     word [active_dpb], dpb_ramdisk
+    mov     byte [active_drive_num], 0      ; RAM disk uses floppy I/O path
+    mov     word [fat_eoc_min], 0x0FF8
+    mov     word [fat_eoc_mark], 0x0FFF
+    ; Keep fat_spt/heads as-is for RAM disk
+    jmp     .set_done
+
+.set_done:
+    ; Invalidate FAT buffer cache when switching drives
+    mov     word [fat_buffer_sector], 0xFFFF
+    pop     ax
+    ret
+
+; ---------------------------------------------------------------------------
+; fat_save_drive / fat_restore_drive - Save/restore active drive state
+; Uses a static save area. Must be paired. Not reentrant.
+; ---------------------------------------------------------------------------
+saved_active_dpb        dw  0
+saved_active_drive_num  db  0
+saved_fat_eoc_min       dw  0
+saved_fat_eoc_mark      dw  0
+saved_fat_spt           dw  0
+saved_fat_heads         dw  0
+
+fat_save_drive:
+    push    ax
+    mov     ax, [active_dpb]
+    mov     [saved_active_dpb], ax
+    mov     al, [active_drive_num]
+    mov     [saved_active_drive_num], al
+    mov     ax, [fat_eoc_min]
+    mov     [saved_fat_eoc_min], ax
+    mov     ax, [fat_eoc_mark]
+    mov     [saved_fat_eoc_mark], ax
+    mov     ax, [fat_spt]
+    mov     [saved_fat_spt], ax
+    mov     ax, [fat_heads]
+    mov     [saved_fat_heads], ax
+    pop     ax
+    ret
+
+fat_restore_drive:
+    push    ax
+    mov     ax, [saved_active_dpb]
+    mov     [active_dpb], ax
+    mov     al, [saved_active_drive_num]
+    mov     [active_drive_num], al
+    mov     ax, [saved_fat_eoc_min]
+    mov     [fat_eoc_min], ax
+    mov     ax, [saved_fat_eoc_mark]
+    mov     [fat_eoc_mark], ax
+    mov     ax, [saved_fat_spt]
+    mov     [fat_spt], ax
+    mov     ax, [saved_fat_heads]
+    mov     [fat_heads], ax
+    ; Invalidate FAT buffer cache since drive may have changed
+    mov     word [fat_buffer_sector], 0xFFFF
+    pop     ax
+    ret
+
+; ---------------------------------------------------------------------------
 ; fat_read_sector - Read one sector from disk with retry
 ; Input: AX = LBA sector number, ES:BX = buffer
-; Uses boot_drive from kernel data
+; Uses active_drive_num for INT 13h drive selection
 ; ---------------------------------------------------------------------------
 DISK_RETRY_COUNT    equ     3           ; Number of retries for disk I/O
 
@@ -27,7 +119,7 @@ fat_read_sector:
     mov     ch, al              ; CH = cylinder
     mov     dh, dl              ; DH = head
 
-    mov     dl, [boot_drive]
+    mov     dl, [active_drive_num]
     mov     ax, 0x0201          ; Read 1 sector
     int     0x13
     jnc     .read_ok
@@ -73,7 +165,7 @@ fat_write_sector:
     mov     ch, al
     mov     dh, dl
 
-    mov     dl, [boot_drive]
+    mov     dl, [active_drive_num]
     mov     ax, 0x0301          ; Write 1 sector
     int     0x13
     jnc     .write_ok
@@ -103,21 +195,24 @@ fat_write_sector:
 ; Output: AX = LBA sector number, CF set on invalid cluster
 ; ---------------------------------------------------------------------------
 fat_cluster_to_lba:
+    push    bx
     ; Validate cluster number
     cmp     ax, 2                   ; Clusters 0 and 1 are reserved
     jb      .invalid
-    cmp     ax, [dpb_a.max_cluster] ; Check against maximum
+    mov     bx, [active_dpb]
+    cmp     ax, [bx + DPB_MAX_CLUSTER] ; Check against maximum
     jae     .check_special
 
     ; Valid data cluster - convert to LBA
     sub     ax, 2
-    add     ax, [dpb_a.data_start]  ; Use DPB data_start instead of hardcoded 33
+    add     ax, [bx + DPB_DATA_START]
+    pop     bx
     clc
     ret
 
 .check_special:
     ; Check for end-of-chain markers (0xFF8-0xFFF for FAT12, 0xFFF8-0xFFFF for FAT16)
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .end_of_chain
     ; Check for bad cluster marker (0xFF7 for FAT12, 0xFFF7 for FAT16)
     cmp     ax, 0x0FF7
@@ -127,11 +222,13 @@ fat_cluster_to_lba:
 
 .invalid:
 .bad_cluster:
+    pop     bx
     stc                             ; Set carry flag for invalid cluster
     ret
 
 .end_of_chain:
     ; End of chain is not really invalid, but can't be converted to LBA
+    pop     bx
     stc
     ret
 
@@ -229,6 +326,26 @@ fat_name_to_fcb:
     ret
 
 ; ---------------------------------------------------------------------------
+; fat_get_root_params - Get root directory start and sector count from active DPB
+; Output: AX = root directory start sector, CX = root directory sector count
+; ---------------------------------------------------------------------------
+fat_get_root_params:
+    push    bx
+    mov     bx, [active_dpb]
+    mov     ax, [bx + DPB_ROOT_START]
+    ; CX = (root_entries * 32 + 511) / 512
+    mov     cx, [bx + DPB_ROOT_ENTRIES]
+    pop     bx
+    push    dx
+    shr     cx, 4                   ; entries / 16 = sectors (32 bytes/entry, 512/32=16 per sector)
+    test    cx, cx
+    jnz     .root_ok
+    mov     cx, 1                   ; Minimum 1 sector
+.root_ok:
+    pop     dx
+    ret
+
+; ---------------------------------------------------------------------------
 ; fat_find_in_root - Search root directory for a file
 ; Input: DS:SI = FCB-format 11-byte name to find
 ; Output: CF=0 found (DI = offset into disk_buffer of entry,
@@ -244,9 +361,8 @@ fat_find_in_root:
     push    ds
     pop     es
 
-    ; Root directory starts at sector 19, 14 sectors
-    mov     ax, 19              ; Root dir start
-    mov     cx, 14              ; Root dir sectors
+    ; Root directory start/size from active DPB
+    call    fat_get_root_params ; AX = root_start, CX = root_sectors
 
 .next_sector:
     push    cx
@@ -392,7 +508,7 @@ fat_find_in_directory:
     call    fat_get_next_cluster
     mov     dx, ax
     pop     si
-    cmp     dx, 0x0FF8
+    cmp     dx, [fat_eoc_min]
     jb      .next_cluster
 
     ; End of chain, not found
@@ -410,7 +526,7 @@ fat_find_in_directory:
     call    fat_get_next_cluster
     mov     dx, ax
     pop     si
-    cmp     dx, 0x0FF8
+    cmp     dx, [fat_eoc_min]
     jb      .next_cluster
     jmp     .not_found
 
@@ -433,9 +549,7 @@ fat_find_in_directory:
 
 .search_root:
     ; Root directory: use existing fat_find_in_root logic
-    ; Root directory starts at sector 19, 14 sectors
-    mov     ax, 19
-    mov     cx, 14
+    call    fat_get_root_params ; AX = root_start, CX = root_sectors
 
 .next_root_sector:
     push    cx
@@ -674,11 +788,30 @@ resolve_path:
     ; Point SI at path_buffer
     mov     si, path_buffer
 
-    ; Skip drive letter if present (e.g., "A:" or "A:\")
+    ; Check for drive letter and switch active drive if present
     cmp     byte [si + 1], ':'
     jne     .no_drive
+
+    ; Extract drive letter and switch
+    mov     al, [si]
+    ; Convert to uppercase
+    cmp     al, 'a'
+    jb      .drive_upper
+    cmp     al, 'z'
+    ja      .drive_upper
+    sub     al, 0x20
+.drive_upper:
+    sub     al, 'A'             ; AL = drive number (0=A:, 2=C:)
+    call    fat_set_active_drive
     add     si, 2
+    jmp     .drive_set
+
 .no_drive:
+    ; No drive letter - use current_drive
+    mov     al, [current_drive]
+    call    fat_set_active_drive
+
+.drive_set:
 
     ; Skip leading slash if present (absolute path)
     cmp     byte [si], '\'
@@ -887,7 +1020,10 @@ resolve_path:
 ; Output: AX = next cluster (>= 0xFF8/0xFFF8 = end of chain)
 ; ---------------------------------------------------------------------------
 fat_get_next_cluster:
-    cmp     byte [dpb_a.fat_type], 16
+    push    bx
+    mov     bx, [active_dpb]
+    cmp     byte [bx + DPB_FAT_TYPE], 16
+    pop     bx
     je      fat16_get_next_cluster
     jmp     fat12_get_next_cluster
 
@@ -896,7 +1032,10 @@ fat_get_next_cluster:
 ; Output: AX = allocated cluster, CF set if disk full
 ; ---------------------------------------------------------------------------
 fat_alloc_cluster:
-    cmp     byte [dpb_a.fat_type], 16
+    push    bx
+    mov     bx, [active_dpb]
+    cmp     byte [bx + DPB_FAT_TYPE], 16
+    pop     bx
     je      fat16_alloc_cluster
     jmp     fat12_alloc_cluster
 
@@ -905,7 +1044,10 @@ fat_alloc_cluster:
 ; Input: AX = cluster number, DX = value to set
 ; ---------------------------------------------------------------------------
 fat_set_cluster:
-    cmp     byte [dpb_a.fat_type], 16
+    push    bx
+    mov     bx, [active_dpb]
+    cmp     byte [bx + DPB_FAT_TYPE], 16
+    pop     bx
     je      fat16_set_cluster
     jmp     fat12_set_cluster
 
@@ -914,6 +1056,9 @@ fat_set_cluster:
 ; Input: AX = first cluster of chain to free
 ; ---------------------------------------------------------------------------
 fat_free_chain:
-    cmp     byte [dpb_a.fat_type], 16
+    push    bx
+    mov     bx, [active_dpb]
+    cmp     byte [bx + DPB_FAT_TYPE], 16
+    pop     bx
     je      fat16_free_chain
     jmp     fat12_free_chain

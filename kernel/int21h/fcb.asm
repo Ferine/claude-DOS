@@ -234,7 +234,7 @@ int21_14:
     push    cx
     call    fat_get_next_cluster
     pop     cx
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .eof                    ; Unexpected EOF
     dec     cx
     jnz     .walk_chain
@@ -482,7 +482,7 @@ int21_15:
     jc      .disk_full_15
     ; AX = new cluster, mark it as end of chain
     push    ax
-    mov     dx, 0x0FFF              ; End of chain marker
+    mov     dx, [fat_eoc_mark]              ; End of chain marker
     call    fat_set_cluster
     pop     ax
     ; Store in FCB and directory entry
@@ -542,7 +542,7 @@ int21_15:
     push    cx
     push    ax
     call    fat_get_next_cluster
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .need_extend_15
     mov     bx, ax
     pop     ax
@@ -568,7 +568,7 @@ int21_15:
     pop     ax                      ; AX = new cluster
     ; Mark new as end of chain
     push    ax
-    mov     dx, 0x0FFF
+    mov     dx, [fat_eoc_mark]
     call    fat_set_cluster
     pop     ax
     dec     cx
@@ -806,8 +806,7 @@ int21_16:
 
 .create_new_16:
     ; File doesn't exist - find empty slot in root directory
-    mov     ax, 19                  ; Root dir start
-    mov     cx, 14                  ; Root dir sectors
+    call    fat_get_root_params     ; AX = root_start, CX = root_sectors
 
 .scan_root_16:
     push    cx
@@ -1006,7 +1005,7 @@ int21_21:
     push    cx
     call    fat_get_next_cluster
     pop     cx
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .eof_21
     dec     cx
     jnz     .walk_chain_21
@@ -1160,7 +1159,7 @@ int21_22:
     call    fat_alloc_cluster
     jc      .disk_full_22
     push    ax
-    mov     dx, 0x0FFF
+    mov     dx, [fat_eoc_mark]
     call    fat_set_cluster
     pop     ax
     mov     [es:bp + FCB_RESERVED], ax
@@ -1213,7 +1212,7 @@ int21_22:
     push    cx
     push    ax
     call    fat_get_next_cluster
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .need_extend_22
     mov     bx, ax
     pop     ax
@@ -1236,7 +1235,7 @@ int21_22:
     call    fat_set_cluster
     pop     ax
     push    ax
-    mov     dx, 0x0FFF
+    mov     dx, [fat_eoc_mark]
     call    fat_set_cluster
     pop     ax
     dec     cx

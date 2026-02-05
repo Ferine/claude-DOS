@@ -45,6 +45,26 @@ cmd_dir:
     jmp     .parse_opts
 .opts_done:
 
+    ; Determine drive letter for header
+    mov     si, [dir_filespec]
+    cmp     byte [si + 1], ':'
+    jne     .use_default_drive
+    mov     al, [si]
+    cmp     al, 'a'
+    jb      .dir_drive_ok
+    cmp     al, 'z'
+    ja      .dir_drive_ok
+    sub     al, 0x20            ; to uppercase
+.dir_drive_ok:
+    jmp     .set_dir_drive
+.use_default_drive:
+    mov     ah, 0x19            ; Get current drive
+    int     0x21
+    add     al, 'A'
+.set_dir_drive:
+    mov     [dir_hdr_drive], al
+    mov     [dir_hdr_drive2], al
+
     ; Print header
     mov     dx, dir_header
     mov     ah, 0x09
@@ -64,7 +84,51 @@ cmd_dir:
     jmp     .have_spec
 .check_slash:
     cmp     byte [si], '/'
-    jne     .have_spec
+    je      .use_all
+    ; Check if path ends with backslash or colon (directory, needs *.*)
+    push    si
+.find_end:
+    cmp     byte [si], 0
+    je      .at_end
+    cmp     byte [si], ' '
+    je      .at_end
+    cmp     byte [si], '/'
+    je      .at_end
+    inc     si
+    jmp     .find_end
+.at_end:
+    dec     si              ; Point to last char
+    mov     al, [si]
+    pop     si
+    cmp     al, '\'
+    je      .append_wildcard
+    cmp     al, ':'
+    je      .append_wildcard
+    jmp     .have_spec
+.append_wildcard:
+    ; Copy path to dir_spec_buf and append *.*
+    push    si
+    mov     di, dir_spec_buf
+.copy_dir_path:
+    lodsb
+    cmp     al, 0
+    je      .dir_path_end
+    cmp     al, ' '
+    je      .dir_path_end
+    cmp     al, '/'
+    je      .dir_path_end
+    stosb
+    jmp     .copy_dir_path
+.dir_path_end:
+    ; Append *.*
+    mov     byte [di], '*'
+    mov     byte [di+1], '.'
+    mov     byte [di+2], '*'
+    mov     byte [di+3], 0
+    pop     si
+    mov     dx, dir_spec_buf
+    jmp     .have_spec
+.use_all:
     mov     dx, dir_all_spec
 .have_spec:
     mov     cx, 0x37            ; All attributes
@@ -275,9 +339,14 @@ cmd_dir:
     ret
 
 ; DIR data
-dir_header      db  ' Volume in drive A is CLAUDEDOS', 0x0D, 0x0A
-                db  ' Directory of A:\', 0x0D, 0x0A, 0x0D, 0x0A, '$'
+dir_header      db  ' Volume in drive '
+dir_hdr_drive   db  'A'
+                db  ' is CLAUDEDOS', 0x0D, 0x0A
+                db  ' Directory of '
+dir_hdr_drive2  db  'A'
+                db  ':\', 0x0D, 0x0A, 0x0D, 0x0A, '$'
 dir_all_spec    db  '*.*', 0
+dir_spec_buf    times 80 db 0
 dir_dir_tag     db  '<DIR>$'
 dir_files_msg   db  ' file(s)  $'
 dir_bytes_msg   db  ' bytes', 0x0D, 0x0A, '$'

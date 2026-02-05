@@ -241,9 +241,8 @@ int21_3C_common:
     test    ax, ax
     jnz     .cr_scan_subdir
 
-    ; Root directory: scan sectors 19-32
-    mov     ax, 19                  ; Root dir start
-    mov     cx, 14                  ; Root dir sectors
+    ; Root directory: scan from DPB
+    call    fat_get_root_params     ; AX = root_start, CX = root_sectors
 
 .cr_scan_sector:
     push    cx
@@ -324,7 +323,7 @@ int21_3C_common:
     mov     ax, dx
     call    fat_get_next_cluster
     mov     dx, ax
-    cmp     dx, 0x0FF8
+    cmp     dx, [fat_eoc_min]
     jb      .cr_subdir_loop
     jmp     .cr_dir_full            ; Directory full, no empty slots
 
@@ -437,6 +436,12 @@ int21_3C_common:
     ; Fill SFT entry
     mov     word [di + SFT_ENTRY.ref_count], 1
     mov     word [di + SFT_ENTRY.open_mode], OPEN_READWRITE
+    ; Store BIOS drive number in flags field
+    push    ax
+    xor     ax, ax
+    mov     al, [active_drive_num]
+    mov     [di + SFT_ENTRY.flags], ax
+    pop     ax
     mov     byte [di + SFT_ENTRY.attr], 0
     mov     word [di + SFT_ENTRY.first_cluster], 0
     mov     word [di + SFT_ENTRY.cur_cluster], 0
@@ -655,6 +660,11 @@ int21_3D:
     and     ax, 0x00FF              ; AL only
     mov     [di + SFT_ENTRY.open_mode], ax
 
+    ; Store BIOS drive number in flags field (low byte = drive for disk files)
+    xor     ax, ax
+    mov     al, [active_drive_num]  ; BIOS drive (0=A:, 0x80=C:)
+    mov     [di + SFT_ENTRY.flags], ax
+
     ; Store dir sector/index
     mov     ax, [search_dir_sector]
     mov     [di + SFT_ENTRY.dir_sector], ax
@@ -842,6 +852,17 @@ int21_3F:
     ; DI = SFT entry pointer
     mov     bp, di                  ; BP = SFT entry pointer
 
+    ; Switch to the drive this file was opened on
+    mov     al, [cs:bp + SFT_ENTRY.flags]  ; BIOS drive number
+    cmp     al, 0x80
+    jne     .read_not_hd
+    mov     al, 2                   ; C:
+    jmp     .read_set_drive
+.read_not_hd:
+    ; AL already = logical drive (0=A:, 3=D:)
+.read_set_drive:
+    call    fat_set_active_drive
+
     ; Validate read permission: check open mode
     mov     ax, [cs:bp + SFT_ENTRY.open_mode]
     cmp     al, OPEN_WRITE
@@ -958,7 +979,7 @@ int21_3F:
     push    dx
     mov     ax, [cs:bp + SFT_ENTRY.cur_cluster]
     call    fat_get_next_cluster
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .chain_end
     mov     [cs:bp + SFT_ENTRY.cur_cluster], ax
     inc     word [cs:bp + SFT_ENTRY.rel_cluster]
@@ -1071,6 +1092,16 @@ int21_40:
     ; DI = SFT entry pointer
     mov     bp, di                  ; BP = SFT entry pointer
 
+    ; Switch to the drive this file was opened on
+    mov     al, [cs:bp + SFT_ENTRY.flags]  ; BIOS drive number
+    cmp     al, 0x80
+    jne     .write_not_hd
+    mov     al, 2                   ; C:
+    jmp     .write_set_drive
+.write_not_hd:
+.write_set_drive:
+    call    fat_set_active_drive
+
     ; Validate write permission: check open mode
     mov     ax, [cs:bp + SFT_ENTRY.open_mode]
     cmp     al, OPEN_READ
@@ -1107,7 +1138,7 @@ int21_40:
     ; >= 0xFF8 (FAT12) or 0xFFF8 (FAT16) means end of chain
     cmp     ax, 2
     jb      .write_need_cluster     ; Clusters 0,1 = need to allocate
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jb      .write_have_cluster     ; Valid cluster in range
     ; Fall through to allocate (end of chain or invalid)
 
@@ -1132,7 +1163,7 @@ int21_40:
     ; Clusters 0 and 1 are reserved, so if cur_cluster < 2, it's a new file
     cmp     ax, 2
     jb      .write_first_cluster
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .write_first_cluster
     ; Not first - link previous cluster to new one
     push    cx
@@ -1583,7 +1614,7 @@ int21_42:
     push    cx
     call    fat_get_next_cluster
     pop     cx
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jae     .seek_found
     inc     bx
     cmp     bx, cx
@@ -2404,6 +2435,13 @@ int21_6C:
     and     ax, 0x00FF
     mov     [di + SFT_ENTRY.open_mode], ax
 
+    ; Store BIOS drive number in flags field
+    push    ax
+    xor     ax, ax
+    mov     al, [active_drive_num]
+    mov     [di + SFT_ENTRY.flags], ax
+    pop     ax
+
     mov     ax, [search_dir_sector]
     mov     [di + SFT_ENTRY.dir_sector], ax
     mov     ax, [search_dir_index]
@@ -2505,6 +2543,13 @@ int21_6C:
     and     ax, 0x00FF
     mov     [di + SFT_ENTRY.open_mode], ax
 
+    ; Store BIOS drive number in flags field
+    push    ax
+    xor     ax, ax
+    mov     al, [active_drive_num]
+    mov     [di + SFT_ENTRY.flags], ax
+    pop     ax
+
     mov     ax, [search_dir_sector]
     mov     [di + SFT_ENTRY.dir_sector], ax
     mov     ax, [search_dir_index]
@@ -2551,9 +2596,8 @@ int21_6C:
     test    ax, ax
     jnz     .ext_create_subdir
 
-    ; Root directory scan
-    mov     ax, 19
-    mov     cx, 14
+    ; Root directory scan from DPB
+    call    fat_get_root_params     ; AX = root_start, CX = root_sectors
 .ext_scan_root:
     push    cx
     push    ax
@@ -2622,7 +2666,7 @@ int21_6C:
     mov     ax, dx
     call    fat_get_next_cluster
     mov     dx, ax
-    cmp     dx, 0x0FF8
+    cmp     dx, [fat_eoc_min]
     jb      .ext_subdir_loop
     jmp     .ext_dir_full
 
@@ -2699,6 +2743,13 @@ int21_6C:
     mov     ax, [save_ax]
     and     ax, 0x00FF
     mov     [di + SFT_ENTRY.open_mode], ax
+
+    ; Store BIOS drive number in flags field
+    push    ax
+    xor     ax, ax
+    mov     al, [active_drive_num]
+    mov     [di + SFT_ENTRY.flags], ax
+    pop     ax
 
     mov     ax, [search_dir_sector]
     mov     [di + SFT_ENTRY.dir_sector], ax

@@ -51,7 +51,7 @@ load_com:
 
     ; Get next cluster
     call    fat_get_next_cluster
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jb      .load_loop
 
     ; Success

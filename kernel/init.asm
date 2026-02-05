@@ -43,6 +43,9 @@ kernel_init:
     ; Install default CPU exception handlers (for debugging)
     call    install_exception_handlers
 
+    ; Probe for hard disk (C: drive)
+    call    init_hard_disk
+
     ; Parse CONFIG.SYS (if present)
     ; call    parse_config_sys    ; Enabled in Phase 10
 
@@ -665,7 +668,7 @@ load_shell:
 
     ; Get next cluster
     call    fat_get_next_cluster
-    cmp     ax, 0x0FF8
+    cmp     ax, [fat_eoc_min]
     jb      .load_cluster
 
     ; Jump to COMMAND.COM
@@ -691,6 +694,183 @@ load_shell:
     call    bios_print_string
     pop     es
     ret
+
+; ---------------------------------------------------------------------------
+; init_hard_disk - Probe for hard disk and initialize C: drive
+; Probes BIOS for drive 0x80, reads BPB, populates dpb_c and CDS entry
+; ---------------------------------------------------------------------------
+init_hard_disk:
+    pusha
+    push    es
+
+    ; Step 1: Probe INT 13h AH=08h to check if drive 0x80 exists
+    mov     ah, 0x08
+    mov     dl, 0x80
+    xor     di, di
+    mov     es, di          ; ES:DI = 0000:0000 (required by some BIOSes)
+    int     0x13
+    jc      .no_hd          ; CF set = no hard disk
+    test    dl, dl
+    jz      .no_hd          ; DL=0 means no hard disks
+
+    ; Step 2: Read sector 0 (boot sector/BPB) from drive 0x80
+    ; We need to temporarily use INT 13h directly since fat_read_sector
+    ; uses the active drive which is still A:
+    push    cs
+    pop     es
+    mov     bx, disk_buffer ; Read into disk_buffer
+
+    ; Reset drive first
+    xor     ax, ax
+    mov     dl, 0x80
+    int     0x13
+
+    ; Read sector 0 (CHS 0/0/1)
+    mov     ax, 0x0201      ; AH=02 (read), AL=01 (1 sector)
+    mov     cx, 0x0001      ; CH=0 (cylinder 0), CL=1 (sector 1)
+    mov     dh, 0           ; Head 0
+    mov     dl, 0x80        ; First hard disk
+    int     0x13
+    jc      .no_hd          ; Read failed
+
+    ; Step 3: Validate this is a FAT16 filesystem
+    ; Check for boot signature 0x55AA
+    cmp     byte [disk_buffer + 510], 0x55
+    jne     .no_hd
+    cmp     byte [disk_buffer + 511], 0xAA
+    jne     .no_hd
+
+    ; Check FS type label at offset 54 ("FAT16   ")
+    cmp     byte [disk_buffer + 54], 'F'
+    jne     .no_hd
+    cmp     byte [disk_buffer + 55], 'A'
+    jne     .no_hd
+    cmp     byte [disk_buffer + 56], 'T'
+    jne     .no_hd
+    cmp     byte [disk_buffer + 57], '1'
+    jne     .no_hd
+    cmp     byte [disk_buffer + 58], '6'
+    jne     .no_hd
+
+    ; Step 4: Populate dpb_c from BPB fields
+    ; BPB starts at offset 11 in the boot sector
+    ; Offset 11: bytes per sector (2 bytes)
+    mov     ax, [disk_buffer + 11]
+    mov     [dpb_c.bytes_per_sec], ax
+
+    ; Offset 13: sectors per cluster (1 byte)
+    mov     al, [disk_buffer + 13]
+    dec     al                      ; DPB stores sec_per_clus - 1
+    mov     [dpb_c.sec_per_clus], al
+    inc     al
+
+    ; Compute cluster shift (log2 of sectors per cluster)
+    xor     cl, cl
+.shift_loop:
+    shr     al, 1
+    jz      .shift_done
+    inc     cl
+    jmp     .shift_loop
+.shift_done:
+    mov     [dpb_c.clus_shift], cl
+
+    ; Offset 14: reserved sectors (2 bytes)
+    mov     ax, [disk_buffer + 14]
+    mov     [dpb_c.rsvd_sectors], ax
+
+    ; Offset 16: number of FATs (1 byte)
+    mov     al, [disk_buffer + 16]
+    mov     [dpb_c.num_fats], al
+
+    ; Offset 17: root entry count (2 bytes)
+    mov     ax, [disk_buffer + 17]
+    mov     [dpb_c.root_entries], ax
+
+    ; Offset 22: FAT size in sectors (2 bytes)
+    mov     ax, [disk_buffer + 22]
+    mov     [dpb_c.fat_size], ax
+
+    ; Offset 21: media descriptor byte
+    mov     al, [disk_buffer + 21]
+    mov     [dpb_c.media_byte], al
+
+    ; Compute root_start = reserved_sectors + num_fats * fat_size
+    mov     ax, [dpb_c.rsvd_sectors]
+    xor     cx, cx
+    mov     cl, [dpb_c.num_fats]
+    mov     dx, [dpb_c.fat_size]
+.add_fat:
+    add     ax, dx
+    loop    .add_fat
+    mov     [dpb_c.root_start], ax
+
+    ; Compute root_dir_sectors = (root_entries * 32 + 511) / 512
+    push    ax                      ; Save root_start
+    mov     ax, [dpb_c.root_entries]
+    mov     cl, 5                   ; * 32
+    shl     ax, cl
+    add     ax, 511
+    mov     cl, 9                   ; / 512
+    shr     ax, cl
+    mov     bx, ax                  ; BX = root dir sectors
+    pop     ax                      ; AX = root_start
+
+    ; data_start = root_start + root_dir_sectors
+    add     ax, bx
+    mov     [dpb_c.data_start], ax
+
+    ; Compute max_cluster (total data clusters + 2)
+    ; total_sectors: use 32-bit field at offset 32 if 16-bit field at offset 19 is 0
+    mov     ax, [disk_buffer + 19]  ; total_sectors_16
+    test    ax, ax
+    jnz     .have_total
+    mov     ax, [disk_buffer + 32]  ; total_sectors_32 (low word only, enough for 32MB)
+.have_total:
+    sub     ax, [dpb_c.data_start]  ; Data sectors
+    ; Divide by sectors per cluster
+    xor     cx, cx
+    mov     cl, [dpb_c.sec_per_clus]
+    inc     cl                      ; sec_per_clus stored as N-1
+    xor     dx, dx
+    div     cx                      ; AX = number of clusters
+    add     ax, 2                   ; Clusters are numbered from 2
+    mov     [dpb_c.max_cluster], ax
+
+    ; Compute free cluster count (scan FAT - too slow at boot, mark as unknown)
+    mov     word [dpb_c.free_count], 0xFFFF
+    mov     word [dpb_c.first_free], 2
+
+    ; Step 5: Initialize CDS entry for C: (index 2)
+    mov     di, cds_table + (CDS_SIZE * 2)
+    mov     byte [di + CDS.path], 'C'
+    mov     byte [di + CDS.path + 1], ':'
+    mov     byte [di + CDS.path + 2], '\'
+    mov     byte [di + CDS.path + 3], 0
+    mov     word [di + CDS.flags], CDS_VALID | CDS_PHYSICAL
+    mov     word [di + CDS.backslash_off], 2
+    ; Link CDS to dpb_c
+    mov     word [di + CDS.dpb_ptr], dpb_c
+    mov     [di + CDS.dpb_ptr + 2], cs
+
+    ; Step 6: Link DPB chain: dpb_a.next_dpb -> dpb_c
+    mov     word [dpb_a.next_dpb], dpb_c
+    mov     [dpb_a.next_dpb + 2], cs
+
+    ; Print success message
+    mov     si, msg_hd_detected
+    call    bios_print_string
+
+    pop     es
+    popa
+    ret
+
+.no_hd:
+    ; No hard disk or not FAT16 - dpb_c.max_cluster stays 0
+    pop     es
+    popa
+    ret
+
+msg_hd_detected     db  'Hard disk C: detected (FAT16)', 0x0D, 0x0A, 0
 
 ; Shell loading data
 shell_filename      db  'Loading COMMAND.COM...', 0x0D, 0x0A, 0

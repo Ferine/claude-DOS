@@ -5,8 +5,11 @@ x86 real-mode DOS-compatible operating system written in NASM assembly.
 ## Build Commands
 
 - `make` - Build floppy image
+- `make hd` - Build 32MB FAT16 hard disk image
 - `make run` - Launch in QEMU with GUI
 - `make run-serial` - Launch with serial output
+- `make run-hd` - Launch with floppy + hard disk (C:)
+- `make run-hd-serial` - Launch with hard disk + serial output
 - `make debug` - Launch with GDB support (port 1234)
 - `make clean` - Clean build artifacts
 
@@ -39,7 +42,7 @@ When debugging issues:
 ## Architecture
 
 - `boot/` - VBR and stage2 bootloader
-- `kernel/` - Kernel modules (INT 21h services, FAT12, memory, exec)
+- `kernel/` - Kernel modules (INT 21h services, FAT12/FAT16, memory, exec)
 - `shell/` - COMMAND.COM and internal commands
 - `utils/` - External utilities (.COM)
 - `tests/` - Test programs
