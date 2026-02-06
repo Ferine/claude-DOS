@@ -67,10 +67,15 @@ int21_4B:
     pop     si
     pop     es
 
-    ; Convert filename to FCB name
+    ; Resolve path (handles drive letters, subdirectories, and FCB conversion)
     mov     si, exec_filename
-    call    fat_name_to_fcb
-    ; Copy to exec_fcb_name (need ES=kernel for rep movsb)
+    call    resolve_path            ; AX=dir cluster, fcb_name_buffer=filename
+    jc      .exec_not_found
+
+    ; Save directory cluster for later reuse (EXE header read)
+    mov     [exec_dir_cluster], ax
+
+    ; Copy resolved FCB name to exec_fcb_name
     push    si
     push    di
     push    cx
@@ -86,28 +91,10 @@ int21_4B:
     pop     di
     pop     si
 
-    ; Switch to correct drive based on filename path
-    mov     si, exec_filename
-    cmp     byte [si + 1], ':'
-    jne     .exec_no_drive
-    mov     al, [si]
-    cmp     al, 'a'
-    jb      .exec_drive_upper
-    cmp     al, 'z'
-    ja      .exec_drive_upper
-    sub     al, 0x20
-.exec_drive_upper:
-    sub     al, 'A'             ; AL = drive number
-    call    fat_set_active_drive
-    jmp     .exec_drive_set
-.exec_no_drive:
-    mov     al, [current_drive]
-    call    fat_set_active_drive
-.exec_drive_set:
-
-    ; Find the file to get its size
+    ; Find the file in the resolved directory
     mov     si, exec_fcb_name
-    call    fat_find_in_root
+    mov     ax, [exec_dir_cluster]
+    call    fat_find_in_directory
     jc      .exec_not_found
 
     ; DI = dir entry in disk_buffer
@@ -155,7 +142,8 @@ int21_4B:
     pop     es
     mov     bx, disk_buffer
     mov     si, exec_fcb_name
-    call    fat_find_in_root        ; Get start cluster
+    mov     ax, [exec_dir_cluster]
+    call    fat_find_in_directory   ; Get start cluster (using saved dir)
     jc      .exe_size_error
     mov     ax, [di + 26]           ; Start cluster
     mov     [exec_start_cluster], ax
@@ -777,6 +765,98 @@ int21_4B_overlay:
     jmp     .ovl_load_loop
 
 .ovl_load_done:
+    ; Check if loaded file is an MZ EXE (needs relocation + header stripping)
+    push    ds
+    mov     ds, [cs:.ovl_load_seg]
+    mov     ax, [0]                 ; First word of loaded file
+    pop     ds
+    cmp     ax, 0x5A4D              ; 'MZ'
+    je      .ovl_is_exe
+    cmp     ax, 0x4D5A              ; 'ZM'
+    je      .ovl_is_exe
+    jmp     .ovl_success            ; Not an EXE, raw load is fine
+
+.ovl_is_exe:
+    ; File is MZ EXE - apply relocations and strip header
+    ; Read MZ header fields from loaded image at load_seg:0000
+    push    ds
+    mov     ds, [cs:.ovl_load_seg]
+
+    mov     ax, [0x06]              ; Relocation count
+    mov     [cs:.ovl_reloc_count], ax
+    mov     ax, [0x08]              ; Header size in paragraphs
+    mov     [cs:.ovl_header_paras], ax
+    mov     ax, [0x18]              ; Relocation table offset
+    mov     [cs:.ovl_reloc_off], ax
+
+    ; Calculate load image size = file_size - (header_paras * 16)
+    mov     ax, [cs:.ovl_header_paras]
+    mov     cl, 4
+    shl     ax, cl                  ; AX = header bytes
+    mov     [cs:.ovl_header_bytes], ax
+
+    pop     ds                      ; DS = kernel
+
+    ; Apply relocations
+    mov     cx, [.ovl_reloc_count]
+    test    cx, cx
+    jz      .ovl_no_relocs
+
+    ; Walk relocation table (which is in the loaded image at load_seg:reloc_off)
+    push    ds
+    mov     ds, [cs:.ovl_load_seg]
+    mov     si, [cs:.ovl_reloc_off] ; DS:SI = relocation table in loaded image
+
+.ovl_reloc_loop:
+    ; Read relocation entry: offset (word), segment (word)
+    lodsw
+    mov     di, ax                  ; DI = offset
+    lodsw                           ; AX = segment (relative to load module start)
+
+    ; The relocation target is at [load_seg + header_paras + entry_seg : entry_off]
+    ; But we'll strip the header later, so the actual fixup target in memory is:
+    ; [load_seg + header_paras + entry_seg : entry_off]
+    push    ds
+    mov     bx, [cs:.ovl_load_seg]
+    add     bx, [cs:.ovl_header_paras] ; Skip header to reach load module
+    add     ax, bx                  ; AX = absolute segment of fixup target
+    mov     ds, ax
+    mov     bx, [cs:.ovl_reloc_factor]
+    add     [di], bx                ; Apply relocation factor
+    pop     ds
+
+    loop    .ovl_reloc_loop
+
+    pop     ds                      ; DS = kernel
+
+.ovl_no_relocs:
+    ; Strip MZ header: move load module from load_seg+header_paras to load_seg
+    ; Source = load_seg + header_paras : 0
+    ; Dest = load_seg : 0
+    ; Size = file_size - header_bytes
+
+    mov     ax, [.ovl_file_size]
+    sub     ax, [.ovl_header_bytes] ; AX = load module size in bytes
+    mov     [.ovl_module_size], ax
+
+    ; Set up source and destination segments
+    push    ds
+    push    es
+
+    mov     ax, [.ovl_load_seg]
+    add     ax, [.ovl_header_paras]
+    mov     ds, ax                  ; DS = source (after header)
+    mov     es, [cs:.ovl_load_seg]  ; ES = destination (load segment)
+    xor     si, si
+    xor     di, di
+    mov     cx, [cs:.ovl_module_size]
+    cld
+    rep     movsb                   ; Move load module over header
+
+    pop     es
+    pop     ds
+
+.ovl_success:
     ; Restore ES = kernel
     push    cs
     pop     es
@@ -809,6 +889,11 @@ int21_4B_overlay:
 .ovl_reloc_factor   dw  0
 .ovl_start_cluster  dw  0
 .ovl_file_size      dw  0
+.ovl_reloc_count    dw  0
+.ovl_header_paras   dw  0
+.ovl_reloc_off      dw  0
+.ovl_header_bytes   dw  0
+.ovl_module_size    dw  0
 
 ; AH=4Ch - Terminate with Return Code
 ; Input: AL = return code

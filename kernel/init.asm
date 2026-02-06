@@ -43,11 +43,15 @@ kernel_init:
     ; Install default CPU exception handlers (for debugging)
     call    install_exception_handlers
 
+    ; Install INT 23h (Ctrl-C handler) and INT 24h (Critical Error handler)
+    call    install_int23
+    call    install_int24
+
     ; Probe for hard disk (C: drive)
     call    init_hard_disk
 
     ; Parse CONFIG.SYS (if present)
-    ; call    parse_config_sys    ; Enabled in Phase 10
+    call    parse_config_sys
 
     ; Mark shell as available (COMMAND.COM should be on disk)
     mov     byte [shell_available], 1
@@ -298,6 +302,55 @@ install_exception_handlers:
     pop     ax
     pop     es
     ret
+
+; ---------------------------------------------------------------------------
+; install_int23 - Install INT 23h (Ctrl-C/Break handler)
+; ---------------------------------------------------------------------------
+install_int23:
+    push    es
+    push    ax
+
+    xor     ax, ax
+    mov     es, ax
+
+    ; INT 23h vector at 0000:008C (23h * 4)
+    mov     word [es:0x008C], int23_handler
+    mov     [es:0x008E], cs
+
+    pop     ax
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; install_int24 - Install INT 24h (Critical Error handler)
+; ---------------------------------------------------------------------------
+install_int24:
+    push    es
+    push    ax
+
+    xor     ax, ax
+    mov     es, ax
+
+    ; INT 24h vector at 0000:0090 (24h * 4)
+    mov     word [es:0x0090], int24_handler
+    mov     [es:0x0092], cs
+
+    pop     ax
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; INT 23h handler - Ctrl-C/Break (default: do nothing)
+; ---------------------------------------------------------------------------
+int23_handler:
+    iret
+
+; ---------------------------------------------------------------------------
+; INT 24h handler - Critical Error (default: fail the operation)
+; ---------------------------------------------------------------------------
+int24_handler:
+    mov     al, 3               ; Action: FAIL
+    iret
 
 ; ---------------------------------------------------------------------------
 ; INT 00h handler - Divide Error (always prints for debugging)
@@ -633,7 +686,7 @@ load_shell:
     mov     es, ax
     mov     si, shell_empty_tail    ; Point to empty string
     mov     bx, [cs:shell_env_seg]  ; Environment segment
-    mov     dx, ax                  ; Parent PSP = self (shell is its own parent)
+    xor     dx, dx                  ; No parent PSP (shell is the first process)
     call    build_psp
 
     ; Set memory top in PSP

@@ -1644,23 +1644,34 @@ int21_42:
 
 .seek_walk:
     ; Walk cluster chain from first_cluster to find cluster for new position
-    ; sector_index = file_pos / 512 (= cluster index for 1 sec/cluster)
+    ; cluster_index = file_pos / (sectors_per_cluster * 512)
+    ;               = (file_pos >> 9) / sectors_per_cluster
+    push    bx
+    mov     bx, [cs:active_dpb]        ; Get active DPB pointer
+    xor     ch, ch
+    mov     cl, [cs:bx + DPB_SEC_PER_CLUS] ; Sectors per cluster - 1 (0-based)
+    inc     cx                          ; CX = sectors per cluster
+    push    cx                          ; Save sectors_per_cluster
+
     mov     ax, [cs:bp + SFT_ENTRY.file_pos + 2]
     mov     dx, [cs:bp + SFT_ENTRY.file_pos]
     ; Shift right 9 to get sector index
     shr     ax, 1
     rcr     dx, 1
-    ; Now DX has the high part shifted; we need cluster index
-    ; For 1 sec/cluster, sector_index = cluster_index
-    ; But with 16-bit, we just use DX (low word of shifted value)
-    ; Actually: (pos >> 9) gives sector/cluster index
     mov     cx, 8
 .shift_loop:
     shr     ax, 1
     rcr     dx, 1
     loop    .shift_loop
-    ; DX = cluster index (sectors from start)
-    mov     cx, dx                  ; CX = target cluster index
+    ; DX = sector index from start of file
+
+    ; Divide sector index by sectors_per_cluster to get cluster index
+    pop     cx                          ; CX = sectors_per_cluster
+    mov     ax, dx
+    xor     dx, dx
+    div     cx                          ; AX = cluster index
+    mov     cx, ax                      ; CX = target cluster index
+    pop     bx
 
     ; Walk chain
     mov     ax, [cs:bp + SFT_ENTRY.first_cluster]

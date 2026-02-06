@@ -166,6 +166,7 @@ exec_parent_psp     dw  0           ; Parent PSP segment
 exec_filename       times 128 db 0  ; Filename buffer for EXEC
 exec_fcb_name       times 11 db 0   ; FCB name for EXEC
 exec_is_exe         db  0           ; 1 = .EXE, 0 = .COM
+exec_dir_cluster    dw  0           ; Directory cluster for EXEC file (0=root)
 exec_start_cluster  dw  0           ; Start cluster for EXEC file
 exec_min_alloc      dw  0           ; Min extra paragraphs from EXE header
 exec_max_alloc      dw  0           ; Max extra paragraphs from EXE header

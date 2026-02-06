@@ -16,7 +16,7 @@ COM_LOAD_OFFSET     equ     0x0100      ; .COM programs load at PSP:0100h
 
 ; File handle constants
 MAX_HANDLES         equ     20          ; Per-process handle table size
-SFT_SIZE            equ     20          ; System File Table entries (default)
+SFT_SIZE            equ     40          ; System File Table entries (increased for compatibility)
 
 ; FCB constants
 FCB_SIZE            equ     37          ; Standard FCB size
