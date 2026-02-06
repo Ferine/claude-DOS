@@ -56,7 +56,7 @@ send_keys() {
     for (( i=0; i<${#str}; i++ )); do
         local char="${str:$i:1}"
         case "$char" in
-            [A-Z]) echo "sendkey shift-${char,,}" ;;
+            [A-Z]) echo "sendkey shift-$(echo "$char" | tr 'A-Z' 'a-z')" ;;
             [a-z0-9]) echo "sendkey $char" ;;
             '.') echo "sendkey dot" ;;
             ' ') echo "sendkey spc" ;;

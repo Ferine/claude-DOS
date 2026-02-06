@@ -142,17 +142,314 @@ int21_10:
 ;         DTA filled with matching entry
 ; ---------------------------------------------------------------------------
 int21_11:
-    ; For now, stub - return not found
-    mov     byte [save_ax], 0xFF
-    ret
+    push    es
+    push    si
+    push    di
+    push    bx
+    push    cx
+    push    dx
+
+    ; Get FCB pointer from caller's DS:DX
+    mov     es, [save_ds]
+    mov     di, [save_dx]           ; ES:DI = caller's FCB
+
+    ; Check for extended FCB (byte at FCB-7 == 0xFF)
+    xor     ah, ah                  ; Default search attribute = 0
+    push    di
+    sub     di, 7
+    cmp     byte [es:di], 0xFF
+    jne     .not_extended_11
+    ; Extended FCB: search attribute is at FCB-1
+    add     di, 6                   ; Point to FCB-1
+    mov     ah, [es:di]             ; AH = search attribute
+    pop     di
+    jmp     .have_attr_11
+.not_extended_11:
+    pop     di
+
+.have_attr_11:
+    ; Get DTA address
+    mov     si, [current_dta_off]
+    mov     ds, [current_dta_seg]   ; DS:SI = DTA
+
+    ; Initialize DTA search state (bytes 0-20)
+    ; Byte 0: Drive number
+    mov     al, [es:di]             ; FCB drive byte
+    test    al, al
+    jnz     .have_drive_11
+    push    cs
+    pop     bx
+    push    ds
+    mov     ds, bx
+    mov     al, [current_drive]
+    pop     ds
+    inc     al                      ; Convert 0-based to 1-based
+.have_drive_11:
+    mov     [ds:si], al             ; DTA byte 0 = drive
+
+    ; Bytes 1-11: Search template from FCB name
+    push    si
+    push    di
+    inc     si                      ; DTA offset 1
+    inc     di                      ; FCB offset 1 (filename)
+    mov     cx, 11
+.copy_template_11:
+    mov     al, [es:di]
+    mov     [ds:si], al
+    inc     si
+    inc     di
+    loop    .copy_template_11
+    pop     di
+    pop     si
+
+    ; Byte 12: Search attribute
+    mov     [ds:si + 12], ah
+
+    ; Bytes 13-14: Entry index = 0
+    mov     word [ds:si + 13], 0
+
+    ; Bytes 15-16: Directory cluster = 0 (root)
+    mov     word [ds:si + 15], 0
+
+    ; Bytes 17-20: Reserved = 0
+    mov     word [ds:si + 17], 0
+    mov     word [ds:si + 19], 0
+
+    ; Restore DS = kernel segment
+    push    cs
+    pop     ds
+
+    ; Fall through to common search
+    jmp     fcb_search_common
 
 ; ---------------------------------------------------------------------------
 ; int21_12 - FCB Find next matching file
 ; Output: AL = 00h if found, FFh if no more
 ; ---------------------------------------------------------------------------
 int21_12:
-    mov     byte [save_ax], 0xFF
+    push    es
+    push    si
+    push    di
+    push    bx
+    push    cx
+    push    dx
+
+    ; DTA already has search state from previous 11h/12h call
+    ; Just fall through to common search
+
+; ---------------------------------------------------------------------------
+; Common FCB search routine (uses non-local labels for cross-scope access)
+; DTA search state at current_dta_seg:current_dta_off
+; Stack: dx, cx, bx, di, si, es (pushed by int21_11 or int21_12)
+; ---------------------------------------------------------------------------
+fcb_search_common:
+    ; Get root directory params
+    call    fat_get_root_params     ; AX = root_start, CX = root_sectors
+    mov     [fcb_find_root_start], ax
+
+    ; Load entry index from DTA
+    push    es
+    mov     es, [current_dta_seg]
+    mov     bx, [current_dta_off]
+    mov     dx, [es:bx + 13]       ; DX = entry index
+    pop     es
+
+    ; Calculate total entries in root dir
+    push    bx
+    mov     bx, [active_dpb]
+    mov     cx, [bx + DPB_ROOT_ENTRIES]
+    pop     bx
+    mov     [fcb_find_total_entries], cx
+
+.search_loop:
+    ; Check if we've exhausted all entries
+    cmp     dx, [fcb_find_total_entries]
+    jae     .not_found
+
+    ; Calculate which sector: sector = root_start + (entry_index / 16)
+    mov     ax, dx
+    shr     ax, 4                   ; AX = entry_index / 16
+    add     ax, [fcb_find_root_start] ; AX = absolute sector
+
+    ; Read sector into disk_buffer
+    push    dx
+    push    es
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    pop     es
+    pop     dx
+    jc      .not_found
+
+    ; Calculate offset within sector: (entry_index % 16) * 32
+    mov     ax, dx
+    and     ax, 0x000F              ; AX = entry_index % 16
+    shl     ax, 5                   ; AX = offset (entry * 32)
+    mov     di, disk_buffer
+    add     di, ax                  ; DI = pointer to dir entry
+
+    ; Check for end of directory
+    cmp     byte [di], 0x00
+    je      .not_found
+
+    ; Skip deleted entries
+    cmp     byte [di], 0xE5
+    je      .next_entry
+
+    ; Get entry attributes
+    mov     al, [di + 11]
+
+    ; Get search attribute from DTA
+    push    es
+    mov     es, [current_dta_seg]
+    mov     bx, [current_dta_off]
+    mov     ah, [es:bx + 12]       ; AH = search attribute
+    pop     es
+
+    ; Skip volume labels unless search attribute includes them
+    test    al, ATTR_VOLUME_LABEL
+    jz      .not_vollabel
+    test    ah, ATTR_VOLUME_LABEL
+    jz      .next_entry
+.not_vollabel:
+
+    ; Check attribute filter: if entry has HIDDEN|SYSTEM|DIRECTORY bits
+    ; that the search attribute doesn't include, skip it
+    mov     cl, al
+    and     cl, (ATTR_HIDDEN | ATTR_SYSTEM | ATTR_DIRECTORY)
+    not     ah
+    and     cl, ah
+    not     ah                      ; Restore AH
+    test    cl, cl
+    jnz     .next_entry
+
+    ; Match name against search template (DTA bytes 1-11)
+    push    es
+    mov     es, [current_dta_seg]
+    mov     bx, [current_dta_off]
+    mov     cx, 11
+    mov     si, di                  ; SI = dir entry name (in disk_buffer)
+.match_loop:
+    mov     al, [es:bx + 1]        ; Template byte (in DTA at offset 1+)
+    inc     bx
+    cmp     al, '?'                 ; Wildcard matches any
+    je      .match_ok
+    cmp     al, [si]                ; Compare with dir entry byte
+    jne     .no_match
+.match_ok:
+    inc     si
+    loop    .match_loop
+    pop     es
+
+    ; Match found! Save entry index + 1 back to DTA
+    inc     dx                      ; Next entry for future searches
+    push    es
+    mov     es, [current_dta_seg]
+    mov     bx, [current_dta_off]
+    mov     [es:bx + 13], dx       ; Save updated entry index
+    pop     es
+
+    ; Fill DTA result area (starting at offset 21)
+    push    es
+    mov     es, [current_dta_seg]
+    mov     bx, [current_dta_off]
+
+    ; Byte 21: Drive number
+    mov     al, [es:bx]            ; Copy from DTA byte 0
+    mov     [es:bx + 21], al
+
+    ; Bytes 22-32: Filename (11 bytes from dir entry)
+    push    cx
+    mov     cx, 11
+    mov     si, di                  ; SI = dir entry name
+    push    di
+    lea     di, [bx + 22]
+    push    bx
+.copy_result_name:
+    mov     al, [cs:si]
+    mov     [es:di], al
+    inc     si
+    inc     di
+    loop    .copy_result_name
+    pop     bx
+    pop     di
+
+    ; Byte 33: Attribute
+    mov     al, [di + 11]
+    mov     [es:bx + 33], al
+
+    ; Bytes 34-43: Reserved (10 bytes, zero)
+    push    di
+    push    cx
+    lea     di, [bx + 34]
+    mov     cx, 10
+    xor     al, al
+.zero_reserved:
+    mov     [es:di], al
+    inc     di
+    loop    .zero_reserved
+    pop     cx
+    pop     di
+
+    ; Bytes 44-45: Time
+    mov     ax, [di + 22]
+    mov     [es:bx + 44], ax
+
+    ; Bytes 46-47: Date
+    mov     ax, [di + 24]
+    mov     [es:bx + 46], ax
+
+    ; Bytes 48-49: First cluster
+    mov     ax, [di + 26]
+    mov     [es:bx + 48], ax
+
+    ; Bytes 50-53: File size (dword)
+    mov     ax, [di + 28]
+    mov     [es:bx + 50], ax
+    mov     ax, [di + 30]
+    mov     [es:bx + 52], ax
+
+    pop     cx                      ; Balance push cx above
+    pop     es
+
+    ; Return AL = 0 (found)
+    mov     byte [save_ax], 0
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
     ret
+
+.no_match:
+    pop     es
+.next_entry:
+    inc     dx                      ; Next entry
+    jmp     .search_loop
+
+.not_found:
+    ; No more matches
+    ; Save current entry index back to DTA (so Find Next knows)
+    push    es
+    mov     es, [current_dta_seg]
+    mov     bx, [current_dta_off]
+    mov     [es:bx + 13], dx
+    pop     es
+
+    mov     byte [save_ax], 0xFF
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    ret
+
+; Local data for FCB Find
+fcb_find_root_start     dw  0
+fcb_find_total_entries  dw  0
 
 ; ---------------------------------------------------------------------------
 ; int21_13 - FCB Delete file

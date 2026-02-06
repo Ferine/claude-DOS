@@ -106,6 +106,7 @@ sft_get:
 ; Input: CL = SFT index to store
 ; Output: AX = handle number, CF clear
 ;         CF set if handle table full
+; Uses PSP:0x32 for handle count, PSP:0x34 for handle table pointer
 ; ---------------------------------------------------------------------------
 handle_alloc:
     push    es
@@ -114,11 +115,28 @@ handle_alloc:
     push    bx
 
     mov     es, [current_psp]
-    mov     di, 0x18                ; Handle table offset in PSP
+
+    ; Get handle count from PSP:0x32
+    mov     bx, [es:0x32]
+    test    bx, bx
+    jnz     .have_count
+    mov     bx, MAX_HANDLES         ; Default if not set
+.have_count:
+
+    ; Get handle table pointer from PSP:0x34
+    mov     di, [es:0x34]           ; Offset
+    mov     ax, [es:0x36]           ; Segment
+    test    ax, ax
+    jnz     .have_ptr
+    ; Not set - use default PSP:0x18
+    mov     ax, es
+    mov     di, 0x18
+.have_ptr:
+    mov     es, ax                  ; ES:DI = handle table
     xor     ax, ax                  ; Handle number
 
 .scan:
-    cmp     ax, MAX_HANDLES
+    cmp     ax, bx
     jae     .full
 
     cmp     byte [es:di], 0xFF
@@ -150,15 +168,34 @@ handle_alloc:
 ; Input: BX = handle number
 ; Output: DI = pointer to SFT entry, AL = SFT index, CF clear
 ;         CF set if invalid handle
+; Uses PSP:0x32 for handle count, PSP:0x34 for handle table pointer
 ; ---------------------------------------------------------------------------
 handle_to_sft:
     push    es
-
-    cmp     bx, MAX_HANDLES
-    jae     .bad
+    push    dx
 
     mov     es, [current_psp]
-    mov     al, [es:0x18 + bx]     ; Get SFT index from handle table
+
+    ; Get handle count from PSP:0x32
+    mov     dx, [es:0x32]
+    test    dx, dx
+    jnz     .have_count
+    mov     dx, MAX_HANDLES         ; Default if not set
+.have_count:
+    cmp     bx, dx
+    jae     .bad
+
+    ; Get handle table pointer from PSP:0x34
+    mov     di, [es:0x34]           ; Offset
+    mov     ax, [es:0x36]           ; Segment
+    test    ax, ax
+    jnz     .have_ptr
+    ; Not set - use default PSP:0x18
+    mov     ax, es
+    mov     di, 0x18
+.have_ptr:
+    mov     es, ax                  ; ES:DI = handle table base
+    mov     al, [es:di + bx]       ; Get SFT index from handle table
 
     cmp     al, 0xFF
     je      .bad
@@ -169,11 +206,13 @@ handle_to_sft:
     pop     ax
     jc      .bad
 
+    pop     dx
     pop     es
     clc
     ret
 
 .bad:
+    pop     dx
     pop     es
     stc
     ret
@@ -738,10 +777,20 @@ int21_3E:
     call    handle_to_sft
     jc      .close_bad
 
-    ; Mark handle entry as free
+    ; Mark handle entry as free using dynamic handle table
     push    es
+    push    di
     mov     es, [current_psp]
-    mov     byte [es:0x18 + bx], 0xFF
+    mov     di, [es:0x34]           ; Handle table offset
+    mov     ax, [es:0x36]           ; Handle table segment
+    test    ax, ax
+    jnz     .close_have_ptr
+    mov     ax, es
+    mov     di, 0x18
+.close_have_ptr:
+    mov     es, ax
+    mov     byte [es:di + bx], 0xFF
+    pop     di
     pop     es
 
     ; Dealloc SFT
@@ -1454,9 +1503,7 @@ int21_41:
     jc      .del_not_found
 
     ; AX = directory cluster, fcb_name_buffer = filename
-    ; For now, only allow deleting from root directory
-    test    ax, ax
-    jnz     .del_access_denied
+    ; fat_find_in_directory handles both root (cluster 0) and subdirectories
 
     ; Find file in directory
     mov     si, fcb_name_buffer
@@ -1544,6 +1591,16 @@ int21_42:
     jc      .seek_bad
 
     mov     bp, di                  ; BP = SFT entry
+
+    ; Switch to the drive this file was opened on
+    mov     al, [cs:bp + SFT_ENTRY.flags]  ; BIOS drive number
+    cmp     al, 0x80
+    jne     .seek_not_hd
+    mov     al, 2                   ; C:
+    jmp     .seek_set_drive
+.seek_not_hd:
+.seek_set_drive:
+    call    fat_set_active_drive
 
     ; Get method from saved AL
     mov     al, [save_ax]
@@ -1954,13 +2011,31 @@ int21_46:
 
     ; Close the destination handle (CX) if it's open
     mov     bx, [save_cx]
-    cmp     bx, 20                  ; Validate handle range
-    jae     .force_dest_invalid
 
-    ; Get PSP handle table
+    ; Validate handle range using dynamic count
     push    es
     mov     es, [current_psp]
-    mov     al, [es:0x18 + bx]      ; Get SFT index at dest handle
+    mov     dx, [es:0x32]           ; Handle count
+    test    dx, dx
+    jnz     .force_have_count
+    mov     dx, MAX_HANDLES
+.force_have_count:
+    cmp     bx, dx
+    pop     es
+    jae     .force_dest_invalid
+
+    ; Get handle table pointer
+    push    es
+    mov     es, [current_psp]
+    mov     di, [es:0x34]           ; Handle table offset
+    mov     dx, [es:0x36]           ; Handle table segment
+    test    dx, dx
+    jnz     .force_have_ptr
+    mov     dx, es
+    mov     di, 0x18
+.force_have_ptr:
+    mov     es, dx                  ; ES:DI = handle table
+    mov     al, [es:di + bx]       ; Get SFT index at dest handle
 
     ; If handle is in use (not 0xFF), close it first
     cmp     al, 0xFF
@@ -1981,12 +2056,24 @@ int21_46:
 
 .force_dest_free:
     ; Now set dest handle to point to same SFT as source
-    pop     es                      ; ES = PSP
+    pop     es                      ; ES = handle table segment (from push above)
 
     pop     ax                      ; AL = source SFT index
+
+    ; Get handle table pointer again for the write
+    push    es
     mov     es, [current_psp]
+    mov     di, [es:0x34]
+    mov     dx, [es:0x36]
+    test    dx, dx
+    jnz     .force_have_ptr2
+    mov     dx, es
+    mov     di, 0x18
+.force_have_ptr2:
+    mov     es, dx
     mov     bx, [save_cx]           ; BX = dest handle
-    mov     [es:0x18 + bx], al      ; Point dest to source SFT
+    mov     [es:di + bx], al       ; Point dest to source SFT
+    pop     es
 
     ; Increment ref count of source SFT
     inc     word [si + SFT_ENTRY.ref_count]
@@ -2008,7 +2095,7 @@ int21_46:
     mov     ax, ERR_INVALID_HANDLE
     jmp     dos_set_error
 
-; AH=56h - Rename file
+; AH=56h - Rename file (supports cross-directory move on same drive)
 ; Input: DS:DX = old ASCIIZ name, ES:DI = new ASCIIZ name
 int21_56:
     push    es
@@ -2044,12 +2131,16 @@ int21_56:
     ; AX = directory cluster, fcb_name_buffer = filename
     mov     [.ren_dir_cluster], ax
 
-    ; Find file in directory
+    ; Save the source drive number for cross-drive check
+    mov     al, [active_drive_num]
+    mov     [.ren_src_drive], al
+
+    ; Find file in source directory
     mov     si, fcb_name_buffer
     call    fat_find_in_directory
     jc      .ren_not_found
 
-    ; DI = directory entry, AX = sector number
+    ; DI = directory entry in disk_buffer, AX = sector number
     mov     [.ren_entry_sector], ax
 
     ; Calculate entry index
@@ -2064,8 +2155,17 @@ int21_56:
     test    byte [di + 11], ATTR_READ_ONLY
     jnz     .ren_access_denied
 
+    ; Check if directory - do not allow moving directories
+    test    byte [di + 11], ATTR_DIRECTORY
+    jnz     .ren_access_denied
+
+    ; Save the full 32-byte source directory entry
+    mov     si, di
+    mov     di, .ren_saved_entry
+    mov     cx, 32
+    rep     movsb
+
     ; Copy new filename from caller's ES:DI to path_buffer
-    ; Note: Original ES:DI are in save_es and save_di
     push    ds
     mov     ds, [cs:save_es]
     mov     si, [cs:save_di]
@@ -2089,12 +2189,16 @@ int21_56:
     jc      .ren_path_error
 
     ; AX = new directory cluster, fcb_name_buffer = new filename
-    ; Check that new path is in same directory (simple rename only)
-    cmp     ax, [.ren_dir_cluster]
-    jne     .ren_not_same_dev       ; Cross-directory rename not supported
+    mov     [.ren_new_dir_cluster], ax
 
-    ; Check if new name already exists
+    ; Check drives match (both must be on same active_drive_num)
+    mov     al, [active_drive_num]
+    cmp     al, [.ren_src_drive]
+    jne     .ren_not_same_dev
+
+    ; Check if new name already exists in target directory
     push    ax
+    mov     ax, [.ren_new_dir_cluster]
     mov     si, fcb_name_buffer
     call    fat_find_in_directory
     pop     ax
@@ -2106,7 +2210,12 @@ int21_56:
     mov     cx, 11
     rep     movsb
 
-    ; Re-read the directory sector with the old entry
+    ; Check if same directory (simple rename) or cross-directory (move)
+    mov     ax, [.ren_new_dir_cluster]
+    cmp     ax, [.ren_dir_cluster]
+    jne     .ren_cross_dir
+
+    ; --- Same directory: simple rename in place ---
     push    cs
     pop     es
     mov     bx, disk_buffer
@@ -2133,7 +2242,144 @@ int21_56:
     call    fat_write_sector
     jc      .ren_write_error
 
-    ; Success
+    jmp     .ren_success
+
+.ren_cross_dir:
+    ; --- Cross-directory move ---
+    ; Step 1: Find empty slot in target directory
+    mov     ax, [.ren_new_dir_cluster]
+    test    ax, ax
+    jnz     .ren_target_subdir
+
+    ; Target is root directory: scan from DPB
+    call    fat_get_root_params     ; AX = root_start, CX = root_sectors
+
+.ren_target_root_scan:
+    push    cx
+    push    ax
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    jc      .ren_target_read_err_pop2
+
+    mov     di, disk_buffer
+    xor     cx, cx
+.ren_target_root_entry:
+    cmp     cx, 16
+    jae     .ren_target_root_next
+    cmp     byte [di], 0x00         ; End of dir
+    je      .ren_target_found_slot
+    cmp     byte [di], 0xE5         ; Deleted entry
+    je      .ren_target_found_slot
+    add     di, 32
+    inc     cx
+    jmp     .ren_target_root_entry
+
+.ren_target_root_next:
+    pop     ax
+    pop     cx
+    inc     ax
+    loop    .ren_target_root_scan
+    jmp     .ren_dir_full
+
+.ren_target_found_slot:
+    ; DI = empty slot, sector on stack
+    pop     ax                      ; Sector number
+    mov     [.ren_target_sector], ax
+    pop     cx                      ; Restore outer loop CX
+    jmp     .ren_do_move
+
+.ren_target_subdir:
+    ; Target is subdirectory: walk cluster chain
+    mov     dx, ax                  ; DX = current cluster
+.ren_target_sub_loop:
+    mov     ax, dx
+    call    fat_cluster_to_lba
+    push    dx
+    push    ax
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    call    fat_read_sector
+    pop     ax
+    pop     dx
+    jc      .ren_read_error
+
+    mov     di, disk_buffer
+    xor     cx, cx
+.ren_target_sub_entry:
+    cmp     cx, 16
+    jae     .ren_target_sub_next
+    cmp     byte [di], 0x00
+    je      .ren_target_sub_found
+    cmp     byte [di], 0xE5
+    je      .ren_target_sub_found
+    add     di, 32
+    inc     cx
+    jmp     .ren_target_sub_entry
+
+.ren_target_sub_next:
+    mov     ax, dx
+    call    fat_get_next_cluster
+    mov     dx, ax
+    cmp     dx, [fat_eoc_min]
+    jb      .ren_target_sub_loop
+    jmp     .ren_dir_full
+
+.ren_target_sub_found:
+    ; DI = empty slot in disk_buffer, DX = cluster
+    mov     ax, dx
+    call    fat_cluster_to_lba
+    mov     [.ren_target_sector], ax
+
+.ren_do_move:
+    ; Step 2: Copy saved 32-byte dir entry to new slot, overwrite name
+    ; DI = pointer to empty slot in disk_buffer (already positioned)
+    mov     si, .ren_saved_entry
+    push    di
+    mov     cx, 32
+    rep     movsb                   ; Copy full 32-byte entry
+    pop     di
+
+    ; Overwrite first 11 bytes with new FCB name
+    mov     si, .ren_new_name
+    mov     cx, 11
+    rep     movsb
+
+    ; Step 3: Write target directory sector
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.ren_target_sector]
+    call    fat_write_sector
+    jc      .ren_write_error
+
+    ; Step 4: Re-read source directory sector, mark entry as deleted (0xE5)
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.ren_entry_sector]
+    call    fat_read_sector
+    jc      .ren_read_error
+
+    mov     ax, [.ren_entry_index]
+    shl     ax, 5                   ; * 32
+    mov     di, disk_buffer
+    add     di, ax
+    mov     byte [di], 0xE5         ; Mark as deleted
+
+    ; Step 5: Write source directory sector back
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.ren_entry_sector]
+    call    fat_write_sector
+    jc      .ren_write_error
+
+    ; Do NOT free the cluster chain - data now belongs to new entry
+
+.ren_success:
     pop     dx
     pop     cx
     pop     bx
@@ -2193,6 +2439,19 @@ int21_56:
     mov     ax, ERR_FILE_EXISTS
     jmp     dos_set_error
 
+.ren_dir_full:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_CANNOT_MAKE
+    jmp     dos_set_error
+
+.ren_target_read_err_pop2:
+    pop     ax
+    pop     cx
 .ren_read_error:
 .ren_write_error:
     pop     dx
@@ -2206,9 +2465,13 @@ int21_56:
 
 ; Local variables for rename
 .ren_dir_cluster    dw  0
+.ren_new_dir_cluster dw 0
 .ren_entry_sector   dw  0
 .ren_entry_index    dw  0
+.ren_target_sector  dw  0
+.ren_src_drive      db  0
 .ren_new_name       times 11 db 0
+.ren_saved_entry    times 32 db 0
 
 ; AH=57h - Get/Set file date/time
 ; Input: AL = 0 (get) or 1 (set)
@@ -2318,6 +2581,153 @@ int21_57:
     pop     es
     mov     ax, ERR_READ_FAULT
     jmp     dos_set_error
+
+; AH=5Ah - Create temporary file
+; Input: DS:DX = ASCIIZ path (directory, ending with '\'), CX = attribute
+; Output: CF clear, AX = handle, DS:DX buffer has unique filename appended
+;         CF set, AX = error code on failure
+int21_5A:
+    push    es
+    push    si
+    push    di
+    push    bx
+
+    ; Copy path from caller's DS:DX to a local temp area
+    push    ds
+    mov     ds, [cs:save_ds]
+    mov     si, [cs:save_dx]
+    push    cs
+    pop     es
+    mov     di, .tmp_path_buf
+    xor     cx, cx                  ; Count bytes copied
+.tmp_copy_path:
+    cmp     cx, 115                 ; Leave room for 8-char name + null
+    jae     .tmp_copy_done
+    lodsb
+    stosb
+    test    al, al
+    jz      .tmp_found_end
+    inc     cx
+    jmp     .tmp_copy_path
+.tmp_found_end:
+    dec     di                      ; Back up over null terminator
+.tmp_copy_done:
+    pop     ds                      ; DS = kernel seg
+
+    ; DI now points to end of path string in .tmp_path_buf
+    ; Generate 8-char hex filename from ticks_count
+
+.tmp_retry:
+    push    di                      ; Save path end position for retry
+    mov     ax, [ticks_count + 2]   ; High word
+    mov     dx, [ticks_count]       ; Low word
+
+    ; Convert high word (AX) to 4 hex chars
+    push    dx                      ; Save low word
+    call    .tmp_word_to_hex        ; Writes 4 chars at ES:DI, advances DI
+    pop     ax                      ; Low word into AX
+    call    .tmp_word_to_hex        ; Writes 4 more chars
+
+    ; Null terminate
+    mov     byte [es:di], 0
+
+    ; Copy the complete path+name to the caller's buffer
+    push    ds
+    push    cs
+    pop     ds                      ; DS = kernel seg
+    mov     si, .tmp_path_buf
+    mov     es, [cs:save_ds]
+    mov     di, [cs:save_dx]
+.tmp_copy_back:
+    lodsb
+    mov     [es:di], al
+    inc     di
+    test    al, al
+    jnz     .tmp_copy_back
+    pop     ds                      ; DS = kernel seg
+
+    ; Set up for int21_3C_common: save_ds:save_dx already point to caller's buffer
+    ; Set create_exclusive = 1 so we fail if file already exists
+    mov     byte [create_exclusive], 1
+
+    ; Restore ES to kernel segment before calling create
+    push    cs
+    pop     es
+
+    pop     di                      ; Restore DI (path end) - consumed by retry
+
+    ; Call int21_3C_common to create the file
+    ; save_ds/save_dx already contain the caller's buffer pointer
+    ; save_cx already has the attribute from the caller
+    call    int21_3C_common
+
+    ; Check if create succeeded (save_flags_cf == 0)
+    cmp     byte [save_flags_cf], 0
+    je      .tmp_success
+
+    ; Check if failed because file exists - retry with incremented tick
+    cmp     word [save_ax], ERR_FILE_EXISTS
+    jne     .tmp_fail               ; Some other error, propagate it
+
+    ; Increment ticks_count and retry
+    add     word [ticks_count], 1
+    adc     word [ticks_count + 2], 0
+    ; Need to re-setup DI to path end for retry
+    push    cs
+    pop     es
+    mov     di, .tmp_path_buf
+.tmp_find_end:
+    cmp     byte [di], 0
+    je      .tmp_find_end_done
+    inc     di
+    jmp     .tmp_find_end
+.tmp_find_end_done:
+    ; Back up 8 chars (over the generated name)
+    sub     di, 8
+    jmp     .tmp_retry
+
+.tmp_success:
+    ; Handle already in save_ax, carry already clear
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    ret
+
+.tmp_fail:
+    ; Error code already in save_ax, carry already set
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; .tmp_word_to_hex - Convert AX to 4 uppercase hex chars at ES:DI
+; Advances DI by 4
+; ---------------------------------------------------------------------------
+.tmp_word_to_hex:
+    push    cx
+    mov     cx, 4
+.tmp_hex_loop:
+    rol     ax, 4                   ; Rotate high nibble into low
+    push    ax
+    and     al, 0x0F
+    cmp     al, 10
+    jb      .tmp_hex_digit
+    add     al, 'A' - 10
+    jmp     .tmp_hex_store
+.tmp_hex_digit:
+    add     al, '0'
+.tmp_hex_store:
+    stosb
+    pop     ax
+    loop    .tmp_hex_loop
+    pop     cx
+    ret
+
+; Local buffer for temp file path
+.tmp_path_buf   times 128 db 0
 
 ; AH=5Bh - Create new file (exclusive)
 ; Implemented above as int21_5B_impl

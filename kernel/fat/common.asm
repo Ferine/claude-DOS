@@ -102,8 +102,66 @@ fat_restore_drive:
 DISK_RETRY_COUNT    equ     3           ; Number of retries for disk I/O
 
 fat_read_sector:
+    ; --- Cache lookup: check if sector is already cached ---
+    pusha
+    push    es
+
+    ; Save requested sector (AX) and destination (ES:BX)
+    mov     [.read_lba], ax
+    mov     [.read_dst_off], bx
+    mov     [.read_dst_seg], es
+
+    ; Search cache for matching sector + drive
+    mov     si, cache_entries
+    mov     cx, CACHE_BUFFERS
+    mov     dl, [active_drive_num]  ; DL = current drive
+
+.cache_search:
+    cmp     byte [si + CACHE_VALID], 1
+    jne     .cache_next
+    cmp     word [si + CACHE_SECTOR], ax
+    jne     .cache_next
+    cmp     byte [si + CACHE_DRIVE], dl
+    jne     .cache_next
+
+    ; Cache hit! Copy 512 bytes from cache to ES:BX
+    push    ds
+    push    cx
+    lea     si, [si + CACHE_DATA]   ; DS:SI = cache data source
+    mov     di, [.read_dst_off]     ; ES:DI = destination
+    mov     es, [.read_dst_seg]
+    mov     cx, 256
+    cld
+    rep     movsw                   ; Copy 512 bytes (256 words)
+    pop     cx
+    pop     ds
+
+    ; Update age of this cache entry
+    mov     ax, [cache_age_counter]
+    ; Recover cache entry base: SI was advanced by 512 bytes past CACHE_DATA
+    ; so entry base = SI - CACHE_DATA - 512
+    sub     si, CACHE_DATA + 512
+    mov     [si + CACHE_AGE], ax
+    inc     word [cache_age_counter]
+
+    pop     es
+    popa
+    clc
+    ret
+
+.cache_next:
+    add     si, CACHE_ENTRY_SIZE
+    loop    .cache_search
+
+    ; Cache miss - fall through to disk read
+    pop     es
+    popa
+
+    ; --- Normal disk read with retry ---
     pusha
     mov     [.read_lba], ax             ; Save LBA for retries
+    mov     [.read_dst_off], bx         ; Save destination for cache insert
+    mov     [.read_dst_seg], es
     mov     byte [.read_retries], DISK_RETRY_COUNT
 
 .read_retry:
@@ -178,6 +236,70 @@ fat_read_sector:
     ret
 
 .read_ok:
+    ; Successful disk read - insert into cache
+    ; Find best cache slot: first invalid entry, or oldest (lowest age) entry
+    popa                            ; Restore original registers
+    pusha                           ; Save them again for cache insert
+    push    es
+
+    mov     si, cache_entries       ; SI = current entry
+    mov     di, cache_entries       ; DI = best candidate so far
+    mov     cx, CACHE_BUFFERS
+    mov     dx, 0xFFFF              ; DX = lowest age seen (start with max)
+    xor     bx, bx                  ; BX = flag: found invalid entry (0 = no)
+
+.find_slot:
+    cmp     byte [si + CACHE_VALID], 0
+    jne     .slot_valid
+    ; Found invalid entry - use it immediately
+    mov     di, si
+    mov     bx, 1                   ; Mark that we found an invalid slot
+    jmp     .slot_found
+
+.slot_valid:
+    ; Only consider if we haven't found an invalid entry already
+    test    bx, bx
+    jnz     .find_next
+    ; Check if this entry is older (lower age)
+    cmp     word [si + CACHE_AGE], dx
+    jae     .find_next
+    mov     dx, [si + CACHE_AGE]    ; Update lowest age
+    mov     di, si                  ; DI = this entry (oldest so far)
+
+.find_next:
+    add     si, CACHE_ENTRY_SIZE
+    loop    .find_slot
+
+.slot_found:
+    ; DI = cache entry to fill
+    ; Set metadata
+    mov     ax, [.read_lba]
+    mov     [di + CACHE_SECTOR], ax
+    mov     al, [active_drive_num]
+    mov     [di + CACHE_DRIVE], al
+    mov     byte [di + CACHE_VALID], 1
+    mov     ax, [cache_age_counter]
+    mov     [di + CACHE_AGE], ax
+    inc     word [cache_age_counter]
+
+    ; Copy 512 bytes from ES:BX (the buffer that was just read) to cache
+    push    ds
+    push    es
+    ; Source: the buffer that INT 13h just filled (caller's ES:BX)
+    mov     ax, [.read_dst_seg]
+    mov     ds, ax
+    mov     si, [.read_dst_off]     ; DS:SI = source (just-read data)
+    ; Destination: cache entry data area (kernel DS)
+    pop     es                      ; Discard old ES (we'll set it to kernel seg)
+    push    cs
+    pop     es                      ; ES = kernel segment
+    add     di, CACHE_DATA          ; ES:DI = cache data area
+    mov     cx, 256
+    cld
+    rep     movsw                   ; Copy 512 bytes
+    pop     ds                      ; Restore DS = kernel segment
+
+    pop     es                      ; Restore caller's ES
     popa
     clc
     ret
@@ -185,6 +307,8 @@ fat_read_sector:
 .read_lba       dw  0
 .read_retries   db  0
 .read_bios_err  db  0
+.read_dst_off   dw  0
+.read_dst_seg   dw  0
 
 ; ---------------------------------------------------------------------------
 ; fat_write_sector - Write one sector to disk with retry
@@ -193,6 +317,8 @@ fat_read_sector:
 fat_write_sector:
     pusha
     mov     [.write_lba], ax            ; Save LBA for retries
+    mov     [.write_src_off], bx        ; Save source buffer for cache update
+    mov     [.write_src_seg], es
     mov     byte [.write_retries], DISK_RETRY_COUNT
 
 .write_retry:
@@ -264,6 +390,49 @@ fat_write_sector:
     ret
 
 .write_ok:
+    ; Successful write - update cache if this sector is cached (write-through)
+    push    es
+    mov     si, cache_entries
+    mov     cx, CACHE_BUFFERS
+    mov     ax, [.write_lba]
+    mov     dl, [active_drive_num]
+
+.write_cache_search:
+    cmp     byte [si + CACHE_VALID], 1
+    jne     .write_cache_next
+    cmp     word [si + CACHE_SECTOR], ax
+    jne     .write_cache_next
+    cmp     byte [si + CACHE_DRIVE], dl
+    jne     .write_cache_next
+
+    ; Found matching cache entry - update its data
+    push    ds
+    mov     ax, [.write_src_seg]
+    mov     ds, ax
+    push    si                          ; Save entry base pointer
+    mov     di, si
+    add     di, CACHE_DATA              ; ES=kernel (from push cs/pop es below)
+    push    cs
+    pop     es                          ; ES = kernel segment
+    mov     si, [cs:.write_src_off]     ; DS:SI = source data (caller's buffer)
+    mov     cx, 256
+    cld
+    rep     movsw                       ; Copy 512 bytes to cache
+    pop     si                          ; Restore entry base pointer
+    pop     ds                          ; Restore DS = kernel segment
+
+    ; Update age
+    mov     ax, [cache_age_counter]
+    mov     [si + CACHE_AGE], ax
+    inc     word [cache_age_counter]
+    jmp     .write_cache_done
+
+.write_cache_next:
+    add     si, CACHE_ENTRY_SIZE
+    loop    .write_cache_search
+
+.write_cache_done:
+    pop     es
     popa
     clc
     ret
@@ -271,6 +440,29 @@ fat_write_sector:
 .write_lba      dw  0
 .write_retries  db  0
 .write_bios_err db  0
+.write_src_off  dw  0
+.write_src_seg  dw  0
+
+; ---------------------------------------------------------------------------
+; cache_invalidate_drive - Invalidate all cache entries for current drive
+; Input: none (uses active_drive_num)
+; ---------------------------------------------------------------------------
+cache_invalidate_drive:
+    pusha
+    mov     si, cache_entries
+    mov     cx, CACHE_BUFFERS
+    mov     dl, [active_drive_num]
+.inv_loop:
+    cmp     byte [si + CACHE_VALID], 1
+    jne     .inv_next
+    cmp     byte [si + CACHE_DRIVE], dl
+    jne     .inv_next
+    mov     byte [si + CACHE_VALID], 0  ; Invalidate
+.inv_next:
+    add     si, CACHE_ENTRY_SIZE
+    loop    .inv_loop
+    popa
+    ret
 
 ; ---------------------------------------------------------------------------
 ; fat_cluster_to_lba - Convert cluster number to LBA

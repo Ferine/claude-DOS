@@ -188,11 +188,68 @@ save_flags_cf   db  0           ; 1 = set carry on return
 ; ---------------------------------------------------------------------------
 ; Helper: Set carry flag for error return
 ; Input: AX = error code
+; Also populates extended error info for AH=59h
 ; ---------------------------------------------------------------------------
 dos_set_error:
     mov     [save_ax], ax
     mov     byte [save_flags_cf], 1
+
+    ; Save extended error info
+    mov     [last_error], ax
+
+    ; Look up class/action/locus from table
+    push    bx
+    push    cx
+    mov     bx, .err_map_table
+.err_map_scan:
+    mov     cl, [bx]                ; Error code in table
+    test    cl, cl
+    jz      .err_map_default        ; End of table (sentinel 0)
+    cmp     al, cl
+    je      .err_map_found
+    add     bx, 4                   ; Next entry (code + class + action + locus)
+    jmp     .err_map_scan
+
+.err_map_found:
+    mov     cl, [bx + 1]
+    mov     [last_error_class], cl
+    mov     cl, [bx + 2]
+    mov     [last_error_action], cl
+    mov     cl, [bx + 3]
+    mov     [last_error_locus], cl
+    pop     cx
+    pop     bx
     ret
+
+.err_map_default:
+    mov     byte [last_error_class], 13   ; Unknown
+    mov     byte [last_error_action], 4   ; Abort
+    mov     byte [last_error_locus], 1    ; Unknown
+    pop     cx
+    pop     bx
+    ret
+
+; Error code -> class, action, locus mapping table
+; Format: db error_code, class, action, locus
+.err_map_table:
+    db  0x01, 8,  4, 1     ; ERR_INVALID_FUNC: not found, abort, unknown
+    db  0x02, 8,  3, 2     ; ERR_FILE_NOT_FOUND: not found, user reenter, block device
+    db  0x03, 8,  3, 2     ; ERR_PATH_NOT_FOUND: not found, user reenter, block device
+    db  0x04, 1,  4, 1     ; ERR_TOO_MANY_FILES: out of resource, abort, unknown
+    db  0x05, 3,  4, 2     ; ERR_ACCESS_DENIED: authorization, abort, block device
+    db  0x06, 9,  4, 1     ; ERR_INVALID_HANDLE: bad format, abort, unknown
+    db  0x07, 4,  5, 5     ; ERR_MCB_DESTROYED: internal, immediate exit, memory
+    db  0x08, 1,  4, 5     ; ERR_INSUFFICIENT_MEM: out of resource, abort, memory
+    db  0x0F, 8,  4, 2     ; ERR_INVALID_DRIVE: not found, abort, block device
+    db  0x12, 8,  6, 2     ; ERR_NO_MORE_FILES: not found, ignore, block device
+    db  0x13, 5,  7, 2     ; ERR_WRITE_PROTECT: hardware, retry after user, block device
+    db  0x15, 5,  7, 2     ; ERR_NOT_READY: hardware, retry after user, block device
+    db  0x1D, 5,  7, 2     ; ERR_WRITE_FAULT: hardware, retry after user, block device
+    db  0x1E, 5,  7, 2     ; ERR_READ_FAULT: hardware, retry after user, block device
+    db  0x1F, 5,  5, 2     ; ERR_GENERAL_FAIL: hardware, immediate exit, block device
+    db  0x27, 1,  4, 2     ; ERR_DISK_FULL: out of resource, abort, block device
+    db  0x50, 12, 4, 2     ; ERR_FILE_EXISTS: already exists, abort, block device
+    db  0                   ; End sentinel
 
 ; ---------------------------------------------------------------------------
 ; Helper: Clear carry flag for success return
@@ -304,22 +361,22 @@ int21_table:
     dw      int21_56            ; 56h - Rename file
     dw      int21_57            ; 57h - Get/Set file date/time
     dw      int21_58            ; 58h - Get/Set allocation strategy
-    dw      0                   ; 59h - Get extended error
-    dw      0                   ; 5Ah - Create temporary file
+    dw      int21_59            ; 59h - Get extended error
+    dw      int21_5A            ; 5Ah - Create temporary file
     dw      int21_5B            ; 5Bh - Create new file
     dw      0                   ; 5Ch - Lock/Unlock
     dw      0                   ; 5Dh - Reserved
     dw      0                   ; 5Eh - Reserved
     dw      0                   ; 5Fh - Reserved
-    dw      0                   ; 60h - Truename
+    dw      int21_60            ; 60h - Truename
     dw      0                   ; 61h - Reserved
     dw      int21_62            ; 62h - Get PSP address
     dw      0                   ; 63h - Reserved
     dw      0                   ; 64h - Reserved
     dw      0                   ; 65h - Get extended country info
     dw      0                   ; 66h - Get/Set code page
-    dw      0                   ; 67h - Set handle count
-    dw      0                   ; 68h - Commit file
+    dw      int21_67            ; 67h - Set handle count
+    dw      int21_68            ; 68h - Commit file
     dw      0                   ; 69h - Reserved
     dw      0                   ; 6Ah - Reserved
     dw      0                   ; 6Bh - Reserved

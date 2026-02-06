@@ -198,6 +198,11 @@ cmd_loop:
     cmp     byte [si], 0
     je      cmd_loop
 
+    ; Check for drive change command (e.g., "C:", "A:")
+    call    try_drive_change
+    test    al, al
+    jnz     cmd_loop
+
     ; Set up redirection before executing command
     call    setup_redirection
     jc      .redir_failed
@@ -435,6 +440,56 @@ skip_spaces:
     inc     si
     jmp     skip_spaces
 .done:
+    ret
+
+; ---------------------------------------------------------------------------
+; try_drive_change - Check if command is a drive letter + colon (e.g., "C:")
+; Input: DS:SI = command line
+; Output: AL = 1 if handled (drive changed), 0 if not
+; ---------------------------------------------------------------------------
+try_drive_change:
+    push    si
+
+    ; Check: letter followed by colon followed by end/space
+    mov     al, [si]
+    ; Uppercase
+    cmp     al, 'a'
+    jb      .dc_check
+    cmp     al, 'z'
+    ja      .dc_check
+    sub     al, 0x20
+.dc_check:
+    cmp     al, 'A'
+    jb      .dc_no
+    cmp     al, 'Z'
+    ja      .dc_no
+    mov     dl, al
+    sub     dl, 'A'             ; DL = drive number (0=A, 1=B, 2=C, ...)
+
+    cmp     byte [si + 1], ':'
+    jne     .dc_no
+
+    ; Must end here (null, CR, or space)
+    mov     al, [si + 2]
+    cmp     al, 0
+    je      .dc_do
+    cmp     al, 0x0D
+    je      .dc_do
+    cmp     al, ' '
+    je      .dc_do
+    jmp     .dc_no
+
+.dc_do:
+    ; Change drive via INT 21h AH=0Eh
+    mov     ah, 0x0E
+    int     0x21
+    pop     si
+    mov     al, 1
+    ret
+
+.dc_no:
+    pop     si
+    xor     al, al
     ret
 
 ; ---------------------------------------------------------------------------

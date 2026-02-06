@@ -309,6 +309,533 @@ int21_62:
     mov     [save_bx], bx
     ret
 
+; ===========================================================================
+; AH=59h - Get Extended Error Information
+; Input: BX = version (0000h for DOS 3.0+)
+; Output: AX = extended error code, BH = class, BL = action, CH = locus
+; ===========================================================================
+int21_59:
+    mov     ax, [last_error]
+    mov     [save_ax], ax
+    mov     al, [last_error_class]
+    mov     [save_bx + 1], al       ; BH = error class
+    mov     al, [last_error_action]
+    mov     [save_bx], al           ; BL = suggested action
+    mov     al, [last_error_locus]
+    mov     [save_cx + 1], al       ; CH = error locus
+    mov     byte [save_cx], 0       ; CL = 0
+    call    dos_clear_error
+    ret
+
+; ===========================================================================
+; AH=60h - Truename (Canonicalize filename)
+; Input: DS:SI = source ASCIIZ path, ES:DI = 128-byte destination buffer
+; Output: ES:DI buffer filled with canonical path, CF clear
+;         CF set, AX = error code on failure
+; ===========================================================================
+int21_60:
+    push    si
+    push    di
+    push    bx
+    push    cx
+    push    dx
+
+    ; Copy source path from caller's DS:SI to path_buffer
+    push    ds
+    push    es
+    mov     ds, [cs:save_ds]
+    mov     si, [cs:save_si]
+    push    cs
+    pop     es
+    mov     di, path_buffer
+    mov     cx, 127
+.tn_copy_src:
+    lodsb
+    stosb
+    test    al, al
+    jz      .tn_src_copied
+    loop    .tn_copy_src
+    mov     byte [es:di], 0
+.tn_src_copied:
+    pop     es
+    pop     ds                      ; DS = kernel segment
+
+    ; Use .tn_out_buf as our working output buffer
+    mov     di, .tn_out_buf
+    mov     si, path_buffer
+
+    ; Parse drive letter
+    cmp     byte [si + 1], ':'
+    jne     .tn_no_drive
+
+    ; Drive letter present
+    mov     al, [si]
+    ; Convert to uppercase
+    cmp     al, 'a'
+    jb      .tn_drive_ok
+    cmp     al, 'z'
+    ja      .tn_drive_ok
+    sub     al, 0x20
+.tn_drive_ok:
+    mov     [di], al
+    mov     byte [di + 1], ':'
+    mov     byte [di + 2], '\'
+    add     di, 3
+    add     si, 2                   ; Skip drive letter and colon
+    jmp     .tn_check_abs
+
+.tn_no_drive:
+    ; No drive letter - use current drive
+    mov     al, [current_drive]
+    add     al, 'A'
+    mov     [di], al
+    mov     byte [di + 1], ':'
+    mov     byte [di + 2], '\'
+    add     di, 3
+
+.tn_check_abs:
+    ; Check if path is absolute (starts with \ or /)
+    cmp     byte [si], '\'
+    je      .tn_abs
+    cmp     byte [si], '/'
+    je      .tn_abs
+
+    ; Relative path - prepend current_dir_path
+    cmp     byte [current_dir_path], 0
+    je      .tn_process_components  ; Empty = root, nothing to prepend
+
+    ; Copy current_dir_path components
+    push    si
+    mov     si, current_dir_path
+.tn_copy_cwd:
+    lodsb
+    test    al, al
+    jz      .tn_cwd_done
+    ; Convert forward slash to backslash
+    cmp     al, '/'
+    jne     .tn_cwd_not_slash
+    mov     al, '\'
+.tn_cwd_not_slash:
+    ; Convert to uppercase
+    cmp     al, 'a'
+    jb      .tn_cwd_store
+    cmp     al, 'z'
+    ja      .tn_cwd_store
+    sub     al, 0x20
+.tn_cwd_store:
+    mov     [di], al
+    inc     di
+    jmp     .tn_copy_cwd
+.tn_cwd_done:
+    ; Add trailing backslash after CWD if not already there
+    cmp     byte [di - 1], '\'
+    je      .tn_cwd_has_sep
+    mov     byte [di], '\'
+    inc     di
+.tn_cwd_has_sep:
+    pop     si
+    jmp     .tn_process_components
+
+.tn_abs:
+    inc     si                      ; Skip the leading \ or /
+
+.tn_process_components:
+    ; Process path components from SI, building result at DI
+    ; DI points after "X:\" (and possibly CWD)
+.tn_next_component:
+    cmp     byte [si], 0
+    je      .tn_done
+
+    ; Skip consecutive separators
+    cmp     byte [si], '\'
+    je      .tn_skip_sep
+    cmp     byte [si], '/'
+    je      .tn_skip_sep
+
+    ; Check for "." component
+    cmp     byte [si], '.'
+    jne     .tn_regular
+
+    ; Check for ".."
+    cmp     byte [si + 1], '.'
+    jne     .tn_check_single_dot
+
+    ; ".." - check that next char is separator or null
+    mov     al, [si + 2]
+    test    al, al
+    jz      .tn_dotdot
+    cmp     al, '\'
+    je      .tn_dotdot
+    cmp     al, '/'
+    je      .tn_dotdot
+    ; Not really ".." - treat as regular name
+    jmp     .tn_regular
+
+.tn_dotdot:
+    ; Remove last component from output
+    ; Back up DI to before last backslash (but not past "X:\")
+    mov     bx, .tn_out_buf
+    add     bx, 3                   ; BX = position right after "X:\"
+.tn_backup:
+    cmp     di, bx
+    jbe     .tn_at_root             ; Already at root, can't go higher
+    dec     di
+    cmp     byte [di], '\'
+    jne     .tn_backup
+    ; DI now points at the backslash before last component
+    ; Keep DI here (we'll add the next component after it, or add backslash)
+    inc     di                      ; Point past the backslash
+    jmp     .tn_skip_dotdot
+
+.tn_at_root:
+    mov     di, bx                  ; Reset to right after "X:\"
+
+.tn_skip_dotdot:
+    add     si, 2                   ; Skip ".."
+    ; Skip trailing separator if present
+    cmp     byte [si], '\'
+    je      .tn_skip_dotdot_sep
+    cmp     byte [si], '/'
+    je      .tn_skip_dotdot_sep
+    jmp     .tn_next_component
+.tn_skip_dotdot_sep:
+    inc     si
+    jmp     .tn_next_component
+
+.tn_check_single_dot:
+    ; "." - check that next char is separator or null
+    mov     al, [si + 1]
+    test    al, al
+    jz      .tn_singledot
+    cmp     al, '\'
+    je      .tn_singledot
+    cmp     al, '/'
+    je      .tn_singledot
+    ; Not really "." - treat as regular name
+    jmp     .tn_regular
+
+.tn_singledot:
+    ; Skip "." component
+    inc     si
+    ; Skip trailing separator if present
+    cmp     byte [si], '\'
+    je      .tn_skip_sep
+    cmp     byte [si], '/'
+    je      .tn_skip_sep
+    jmp     .tn_next_component
+
+.tn_skip_sep:
+    inc     si
+    jmp     .tn_next_component
+
+.tn_regular:
+    ; Copy regular component, uppercasing, until separator or null
+.tn_copy_char:
+    lodsb
+    test    al, al
+    jz      .tn_end_component
+    cmp     al, '\'
+    je      .tn_end_component_sep
+    cmp     al, '/'
+    je      .tn_end_component_sep
+    ; Convert to uppercase
+    cmp     al, 'a'
+    jb      .tn_store_char
+    cmp     al, 'z'
+    ja      .tn_store_char
+    sub     al, 0x20
+.tn_store_char:
+    mov     [di], al
+    inc     di
+    jmp     .tn_copy_char
+
+.tn_end_component_sep:
+    ; End of component with separator following
+    mov     byte [di], '\'
+    inc     di
+    jmp     .tn_next_component
+
+.tn_end_component:
+    ; End of component at end of string - don't add trailing backslash
+    jmp     .tn_done
+
+.tn_done:
+    ; Remove trailing backslash unless it's the root "X:\"
+    mov     bx, .tn_out_buf
+    add     bx, 3                   ; Position right after "X:\"
+    cmp     di, bx
+    jbe     .tn_finalize            ; At root "X:\" - keep it
+    cmp     byte [di - 1], '\'
+    jne     .tn_finalize
+    dec     di                      ; Remove trailing backslash
+
+.tn_finalize:
+    ; Null-terminate
+    mov     byte [di], 0
+
+    ; Copy result to caller's ES:DI buffer
+    push    ds
+    push    es
+    mov     es, [cs:save_es]
+    mov     di, [cs:save_di]
+    push    cs
+    pop     ds
+    mov     si, .tn_out_buf
+.tn_copy_out:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .tn_copy_out
+    pop     es
+    pop     ds
+
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    call    dos_clear_error
+    ret
+
+; Working buffer for truename output
+.tn_out_buf     times 128 db 0
+
+; ===========================================================================
+; AH=67h - Set Handle Count
+; Input: BX = new handle table size
+; Output: CF clear on success, CF set + AX = error on failure
+; ===========================================================================
+int21_67:
+    push    es
+    push    di
+    push    si
+    push    bx
+    push    cx
+    push    dx
+
+    mov     bx, [save_bx]          ; BX = requested handle count
+
+    ; If BX <= 20, just return success (default table already holds 20)
+    cmp     bx, MAX_HANDLES
+    jbe     .sh_success
+
+    ; BX > 20: allocate memory for new handle table
+    ; Calculate paragraphs needed: (BX + 15) / 16
+    mov     ax, bx
+    add     ax, 15
+    shr     ax, 4                   ; AX = paragraphs needed
+    push    bx                      ; Save requested count
+    mov     bx, ax
+    call    mcb_alloc               ; AX = segment of new block
+    pop     bx                      ; Restore requested count
+    jc      .sh_no_mem
+
+    ; AX = segment of newly allocated block
+    mov     dx, ax                  ; DX = new table segment
+
+    ; Get current PSP
+    mov     es, [current_psp]
+
+    ; Fill new table with 0xFF (unused handles)
+    push    es
+    push    di
+    mov     es, dx                  ; ES = new table segment
+    xor     di, di                  ; Offset 0
+    mov     cx, bx                  ; Count = requested size
+    mov     al, 0xFF
+    rep     stosb
+    pop     di
+    pop     es                      ; ES = PSP again
+
+    ; Copy existing handle table entries to new block
+    ; Check if PSP:0x34 already points to an external table
+    ; Default: PSP:0x34 = offset 0x18, segment = PSP segment
+    push    ds
+    push    es                      ; Save PSP seg
+    ; Load current handle table pointer from PSP:0x34
+    mov     si, [es:0x34]           ; Offset of current handle table
+    mov     ax, [es:0x36]           ; Segment of current handle table
+    mov     ds, ax                  ; DS:SI = current handle table
+
+    ; Get current handle count
+    mov     es, [cs:current_psp]
+    mov     cx, [es:0x32]           ; Current handle count
+    test    cx, cx
+    jnz     .sh_has_count
+    mov     cx, MAX_HANDLES         ; Default if 0
+.sh_has_count:
+    ; Don't copy more than the new size
+    cmp     cx, bx
+    jbe     .sh_copy_count_ok
+    mov     cx, bx
+.sh_copy_count_ok:
+
+    ; Copy CX bytes from DS:SI to new table at DX:0000
+    push    es
+    mov     es, dx                  ; ES:DI = new table
+    xor     di, di
+    rep     movsb
+    pop     es
+
+    ; Check if old table was external (not the default PSP:0x18)
+    ; If old segment != PSP segment or old offset != 0x18, it's external
+    mov     ax, ds                  ; Old table segment
+    pop     es                      ; ES = PSP again (from earlier push)
+    push    es
+    mov     cx, es                  ; CX = PSP segment
+    cmp     ax, cx
+    jne     .sh_free_old
+    cmp     si, 0x18 + MAX_HANDLES  ; SI was advanced past copy; original was 0x18 if default
+    ; Actually SI was advanced, let's check differently
+    ; The original offset was loaded before copy, but SI has been modified
+    ; We need to save the original offset. Let's recalculate:
+    ; Original SI = [es:0x34] but we already modified...
+    ; Actually we haven't updated PSP:0x34 yet, so we can re-read it
+    mov     si, [es:0x34]           ; Re-read original offset
+    cmp     si, 0x18
+    jne     .sh_free_old
+    ; Default table at PSP:0x18, no need to free
+    jmp     .sh_update_psp
+
+.sh_free_old:
+    ; Free old external handle table
+    ; The segment to free is one less than the data segment (MCB header)
+    ; Actually mcb_free expects the segment of the data block (after MCB)
+    push    bx
+    push    dx
+    push    es
+    mov     es, ax                  ; ES = old table segment
+    call    mcb_free
+    pop     es
+    pop     dx
+    pop     bx
+
+.sh_update_psp:
+    pop     es                      ; ES = PSP
+    pop     ds                      ; DS = kernel segment
+
+    ; Update PSP:0x32 = new handle count
+    mov     [es:0x32], bx
+
+    ; Update PSP:0x34 = far pointer to new table (offset:segment)
+    mov     word [es:0x34], 0       ; Offset = 0 (start of new segment)
+    mov     [es:0x36], dx           ; Segment = new block
+
+.sh_success:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     si
+    pop     di
+    pop     es
+    call    dos_clear_error
+    ret
+
+.sh_no_mem:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     si
+    pop     di
+    pop     es
+    mov     ax, ERR_INSUFFICIENT_MEM
+    jmp     dos_set_error
+
+; ===========================================================================
+; AH=68h - Commit (Flush) File
+; Input: BX = file handle
+; Output: CF clear on success, CF set + AX = error on failure
+; ===========================================================================
+int21_68:
+    push    es
+    push    di
+    push    bx
+    push    bp
+
+    mov     bx, [save_bx]
+
+    ; Device handles (0-4) don't need flushing
+    cmp     bx, 4
+    jbe     .cf_success
+
+    ; Get SFT entry for the handle
+    call    handle_to_sft
+    jc      .cf_bad_handle
+
+    ; DI = SFT entry pointer
+    mov     bp, di
+
+    ; Switch to the file's drive
+    mov     al, [cs:bp + SFT_ENTRY.flags]
+    cmp     al, 0x80
+    jne     .cf_not_hd
+    mov     al, 2                   ; C:
+    jmp     .cf_set_drive
+.cf_not_hd:
+.cf_set_drive:
+    call    fat_set_active_drive
+
+    ; Read directory sector containing this file's entry
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [cs:bp + SFT_ENTRY.dir_sector]
+    call    fat_read_sector
+    jc      .cf_error
+
+    ; Calculate offset to directory entry
+    xor     ah, ah
+    mov     al, [cs:bp + SFT_ENTRY.dir_index]
+    shl     ax, 5                   ; * 32
+    mov     bx, ax
+    add     bx, disk_buffer
+
+    ; Update directory entry fields from SFT
+    mov     ax, [cs:bp + SFT_ENTRY.first_cluster]
+    mov     [bx + 26], ax
+
+    mov     ax, [cs:bp + SFT_ENTRY.file_size]
+    mov     [bx + 28], ax
+    mov     ax, [cs:bp + SFT_ENTRY.file_size + 2]
+    mov     [bx + 30], ax
+
+    mov     ax, [cs:bp + SFT_ENTRY.time]
+    mov     [bx + 22], ax
+    mov     ax, [cs:bp + SFT_ENTRY.date]
+    mov     [bx + 24], ax
+
+    ; Write directory sector back
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [cs:bp + SFT_ENTRY.dir_sector]
+    call    fat_write_sector
+    jc      .cf_error
+
+.cf_success:
+    pop     bp
+    pop     bx
+    pop     di
+    pop     es
+    call    dos_clear_error
+    ret
+
+.cf_bad_handle:
+    pop     bp
+    pop     bx
+    pop     di
+    pop     es
+    mov     ax, ERR_INVALID_HANDLE
+    jmp     dos_set_error
+
+.cf_error:
+    pop     bp
+    pop     bx
+    pop     di
+    pop     es
+    mov     ax, ERR_WRITE_FAULT
+    jmp     dos_set_error
+
 ; ---------------------------------------------------------------------------
 ; bcd_to_bin - Convert BCD byte to binary
 ; Input: AL = BCD value

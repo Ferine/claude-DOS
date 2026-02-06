@@ -35,6 +35,10 @@ debug_trace         db  0           ; Debug: trace INT 21h calls (0=off, 1=on)
 shell_available     db  0           ; 1 if COMMAND.COM can be loaded
 return_code         dw  0           ; Last program return code
 alloc_strategy      db  0           ; Memory allocation strategy
+last_error          dw  0           ; Last error code for AH=59h
+last_error_class    db  0           ; Error class
+last_error_action   db  0           ; Suggested action
+last_error_locus    db  0           ; Error locus
 
 ; Timer tick counter (18.2 Hz)
 ticks_count         dd  0
@@ -129,6 +133,20 @@ active_drive_num    db  0           ; BIOS drive number for active drive (0=A:, 
 fat_eoc_min         dw  0x0FF8      ; Minimum end-of-chain value for active FAT type
 fat_eoc_mark        dw  0x0FFF      ; End-of-chain marker to write for active FAT type
 fat_buffer_drive    db  0xFF        ; Drive owning cached FAT sector (0xFF=none)
+
+; ---------------------------------------------------------------------------
+; Disk sector cache (multiple buffers for read caching)
+; ---------------------------------------------------------------------------
+CACHE_BUFFERS       equ     8           ; Number of cache buffers
+CACHE_ENTRY_SIZE    equ     518         ; 2 (sector) + 1 (drive) + 1 (valid) + 2 (age) + 512 (data)
+CACHE_SECTOR        equ     0           ; Offset: sector number (word)
+CACHE_DRIVE         equ     2           ; Offset: drive number (byte)
+CACHE_VALID         equ     3           ; Offset: valid flag (byte, 1=valid)
+CACHE_AGE           equ     4           ; Offset: age counter (word, higher = more recent)
+CACHE_DATA          equ     6           ; Offset: sector data (512 bytes)
+cache_entries:
+    times CACHE_BUFFERS * CACHE_ENTRY_SIZE db 0
+cache_age_counter   dw  0              ; Global age counter, incremented on each access
 
 ; ---------------------------------------------------------------------------
 ; XMS (Extended Memory Specification) State
