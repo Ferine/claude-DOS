@@ -21,7 +21,7 @@ cmd_path:
     je      .clear_path
 
 .set_path:
-    ; Copy argument to path_value
+    ; Copy argument to path_value (local cache for search_path_for_cmd)
     mov     di, path_value
 .copy_path:
     lodsb
@@ -33,11 +33,29 @@ cmd_path:
     jmp     .copy_path
 .set_done:
     mov     byte [di], 0
+
+    ; Sync to DOS environment block
+    call    .sync_path_to_env
     popa
     ret
 
 .clear_path:
     mov     byte [path_value], 0
+
+    ; Remove PATH from DOS environment
+    push    si
+    push    di
+    mov     si, .path_name
+    mov     di, set_name_buf
+.cp_name:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .cp_name
+    call    env_unset
+    pop     di
+    pop     si
+
     popa
     ret
 
@@ -65,7 +83,41 @@ cmd_path:
     popa
     ret
 
+; ---------------------------------------------------------------------------
+; .sync_path_to_env - Copy path_value to DOS environment as PATH=<value>
+; ---------------------------------------------------------------------------
+.sync_path_to_env:
+    push    si
+    push    di
+
+    ; Copy "PATH" to set_name_buf
+    mov     si, .path_name
+    mov     di, set_name_buf
+.spe_name:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .spe_name
+
+    ; Copy path_value to set_value_buf
+    mov     si, path_value
+    mov     di, set_value_buf
+.spe_val:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .spe_val
+
+    call    env_set
+
+    pop     di
+    pop     si
+    ret
+
+.path_name      db  'PATH', 0
+
 ; Default path value - can be modified by PATH command
+; Kept as a fast local cache for search_path_for_cmd
 path_value      db  'A:\', 0
                 times 124 db 0          ; Room for longer paths
 

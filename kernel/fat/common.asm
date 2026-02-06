@@ -124,13 +124,55 @@ fat_read_sector:
     int     0x13
     jnc     .read_ok
 
+    ; Save BIOS error code before reset
+    mov     [.read_bios_err], ah
+
     ; Error - reset disk and retry
     xor     ax, ax
     int     0x13                ; Reset disk
     dec     byte [.read_retries]
     jnz     .read_retry
 
-    ; All retries failed
+    ; All retries failed - invoke INT 24h critical error handler
+    ; Skip if already in error mode (prevent reentrancy)
+    cmp     byte [error_mode], 0
+    jne     .read_fail_hard
+
+    mov     byte [error_mode], 1
+    ; AH = error info: bit 0 = 0 (read), bit 3 = 1 (fail allowed), bits 5-6 = 01 (FAT area)
+    ; AL = drive number (0=A, 2=C based on BIOS drive)
+    mov     ah, 0x0C            ; Read, fail allowed, disk area
+    mov     al, [current_drive]
+    ; DI = BIOS error code
+    xor     dh, dh
+    mov     dl, [.read_bios_err]
+    mov     di, dx
+    ; BP:SI = device header (use 0:0 as placeholder)
+    xor     bp, bp
+    xor     si, si
+    int     0x24
+    mov     byte [error_mode], 0
+
+    ; AL = handler response: 0=ignore, 1=retry, 2=abort, 3=fail
+    cmp     al, 1
+    je      .read_do_retry
+    cmp     al, 0
+    je      .read_ignore
+
+    ; Abort (2) or Fail (3) - return error
+    jmp     .read_fail_hard
+
+.read_do_retry:
+    mov     byte [.read_retries], DISK_RETRY_COUNT
+    jmp     .read_retry
+
+.read_ignore:
+    ; Pretend success
+    popa
+    clc
+    ret
+
+.read_fail_hard:
     popa
     stc
     ret
@@ -142,6 +184,7 @@ fat_read_sector:
 
 .read_lba       dw  0
 .read_retries   db  0
+.read_bios_err  db  0
 
 ; ---------------------------------------------------------------------------
 ; fat_write_sector - Write one sector to disk with retry
@@ -170,13 +213,52 @@ fat_write_sector:
     int     0x13
     jnc     .write_ok
 
+    ; Save BIOS error code before reset
+    mov     [.write_bios_err], ah
+
     ; Error - reset disk and retry
     xor     ax, ax
     int     0x13                ; Reset disk
     dec     byte [.write_retries]
     jnz     .write_retry
 
-    ; All retries failed
+    ; All retries failed - invoke INT 24h critical error handler
+    cmp     byte [error_mode], 0
+    jne     .write_fail_hard
+
+    mov     byte [error_mode], 1
+    ; AH = error info: bit 0 = 1 (write), bit 3 = 1 (fail allowed), bits 5-6 = 01 (FAT area)
+    ; AL = drive number
+    mov     ah, 0x0D            ; Write, fail allowed, disk area
+    mov     al, [current_drive]
+    ; DI = BIOS error code
+    xor     dh, dh
+    mov     dl, [.write_bios_err]
+    mov     di, dx
+    xor     bp, bp
+    xor     si, si
+    int     0x24
+    mov     byte [error_mode], 0
+
+    ; AL = handler response: 0=ignore, 1=retry, 2=abort, 3=fail
+    cmp     al, 1
+    je      .write_do_retry
+    cmp     al, 0
+    je      .write_ignore
+
+    ; Abort or Fail
+    jmp     .write_fail_hard
+
+.write_do_retry:
+    mov     byte [.write_retries], DISK_RETRY_COUNT
+    jmp     .write_retry
+
+.write_ignore:
+    popa
+    clc
+    ret
+
+.write_fail_hard:
     popa
     stc
     ret
@@ -188,6 +270,7 @@ fat_write_sector:
 
 .write_lba      dw  0
 .write_retries  db  0
+.write_bios_err db  0
 
 ; ---------------------------------------------------------------------------
 ; fat_cluster_to_lba - Convert cluster number to LBA
@@ -388,6 +471,7 @@ fat_find_in_root:
     je      .next_entry_pop
 
     ; Compare 11 bytes (DS:SI vs ES:DI, both in kernel segment)
+    cld                         ; Ensure forward direction
     mov     cx, 11
     repe    cmpsb
     pop     di

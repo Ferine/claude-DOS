@@ -1383,6 +1383,309 @@ int21_22:
 .wr22_cur_cluster   dw  0
 
 ; ---------------------------------------------------------------------------
+; int21_29 - Parse Filename into FCB
+; Input: DS:SI = string to parse (from caller), ES:DI = FCB (from caller)
+;        AL = control bits:
+;          bit 0: skip leading separators
+;          bit 1: change drive byte only if specified
+;          bit 2: change filename only if specified
+;          bit 3: change extension only if specified
+; Output: DS:SI advanced past parsed name (returned to caller)
+;         AL = 0 (no wildcards), 1 (wildcards), 0xFF (bad drive)
+;         ES:DI unchanged
+; ---------------------------------------------------------------------------
+int21_29:
+    push    bx
+    push    cx
+    push    dx
+    push    di
+    push    bp
+
+    ; Get caller's registers
+    mov     si, [save_si]
+    mov     ds, [save_ds]
+    mov     es, [save_es]
+    mov     di, [save_di]
+    mov     al, [save_ax]           ; AL = control bits
+
+    call    parse_filename_core
+
+    ; Store updated SI back to caller
+    mov     [cs:save_si], si
+    ; Store result AL
+    mov     [cs:save_ax], al
+
+    ; Restore kernel DS
+    push    cs
+    pop     ds
+
+    pop     bp
+    pop     di
+    pop     dx
+    pop     cx
+    pop     bx
+    ret
+
+; ---------------------------------------------------------------------------
+; parse_filename_core - Parse filename string into FCB format
+; Input: DS:SI = string to parse, ES:DI = FCB to fill
+;        AL = control bits (bit 0: skip leading separators)
+; Output: SI advanced past parsed name
+;         AL = 0 (no wildcards), 1 (wildcards), 0xFF (bad drive)
+; Clobbers: AH, BX, CX, DX
+; ---------------------------------------------------------------------------
+parse_filename_core:
+    mov     bl, al                  ; BL = control bits
+    xor     bh, bh                  ; BH = wildcard flag
+
+    ; Step 1: Skip leading separators if bit 0 set
+    test    bl, 0x01
+    jz      .no_skip_sep
+.skip_sep:
+    mov     al, [ds:si]
+    cmp     al, ' '
+    je      .do_skip
+    cmp     al, 0x09                ; TAB
+    je      .do_skip
+    cmp     al, ','
+    je      .do_skip
+    cmp     al, ';'
+    je      .do_skip
+    cmp     al, '='
+    je      .do_skip
+    cmp     al, '+'
+    je      .do_skip
+    jmp     .no_skip_sep
+.do_skip:
+    inc     si
+    jmp     .skip_sep
+.no_skip_sep:
+
+    ; Step 2: Parse optional drive letter
+    cmp     byte [ds:si + 1], ':'
+    jne     .no_drive_pfn
+    mov     al, [ds:si]
+    ; Convert to uppercase
+    cmp     al, 'a'
+    jb      .drive_upper_pfn
+    cmp     al, 'z'
+    ja      .drive_upper_pfn
+    sub     al, 0x20
+.drive_upper_pfn:
+    cmp     al, 'A'
+    jb      .no_drive_pfn
+    cmp     al, 'Z'
+    ja      .no_drive_pfn
+    sub     al, 'A'
+    inc     al                      ; 1=A, 2=B, ...
+    mov     [es:di], al             ; FCB[0] = drive
+    add     si, 2                   ; Skip "X:"
+    jmp     .parse_name_pfn
+
+.no_drive_pfn:
+    ; If bit 1 not set, store default drive (0)
+    test    bl, 0x02
+    jnz     .parse_name_pfn
+    mov     byte [es:di], 0         ; Default drive
+
+.parse_name_pfn:
+    ; Step 3: Parse filename (up to 8 chars) into FCB[1..8]
+    push    di
+    inc     di                      ; Point to FCB filename area
+
+    ; Initialize filename with spaces (unless bit 2 set and no name follows)
+    test    bl, 0x04
+    jnz     .check_has_name
+    jmp     .do_fill_name
+.check_has_name:
+    ; Check if next char is a terminator
+    mov     al, [ds:si]
+    call    .is_terminator
+    jc      .skip_name_fill         ; No name follows, leave FCB unchanged
+.do_fill_name:
+    push    di
+    push    cx
+    mov     cx, 8
+    mov     al, ' '
+    rep     stosb
+    pop     cx
+    pop     di
+
+.skip_name_fill:
+    mov     cx, 8
+.name_loop_pfn:
+    mov     al, [ds:si]
+    call    .is_terminator
+    jc      .name_done_pfn
+    cmp     al, '.'
+    je      .name_done_pfn
+    cmp     al, '*'
+    jne     .not_star_name
+    ; Fill remainder with '?'
+    mov     bh, 1                   ; Wildcard found
+.fill_q_name:
+    mov     byte [es:di], '?'
+    inc     di
+    dec     cx
+    jnz     .fill_q_name
+    inc     si                      ; Skip the '*'
+    jmp     .name_done_pfn_nofill
+
+.not_star_name:
+    cmp     al, '?'
+    jne     .not_wild_name
+    mov     bh, 1                   ; Wildcard found
+.not_wild_name:
+    ; Uppercase
+    cmp     al, 'a'
+    jb      .store_name_pfn
+    cmp     al, 'z'
+    ja      .store_name_pfn
+    sub     al, 0x20
+.store_name_pfn:
+    mov     [es:di], al
+    inc     di
+    inc     si
+    dec     cx
+    jnz     .name_loop_pfn
+
+    ; Skip remaining name chars until dot or terminator
+.skip_extra_name:
+    mov     al, [ds:si]
+    call    .is_terminator
+    jc      .name_done_pfn
+    cmp     al, '.'
+    je      .name_done_pfn
+    inc     si
+    jmp     .skip_extra_name
+
+.name_done_pfn:
+.name_done_pfn_nofill:
+    pop     di                      ; Restore DI to FCB start
+
+    ; Step 4: Parse extension
+    mov     al, [ds:si]
+    cmp     al, '.'
+    jne     .no_ext_pfn
+
+    inc     si                      ; Skip '.'
+
+    ; Fill extension with spaces (unless bit 3 set)
+    push    di
+    add     di, 9                   ; FCB extension area
+
+    test    bl, 0x08
+    jnz     .skip_ext_fill
+    push    di
+    push    cx
+    mov     cx, 3
+    mov     al, ' '
+    rep     stosb
+    pop     cx
+    pop     di
+.skip_ext_fill:
+
+    mov     cx, 3
+.ext_loop_pfn:
+    mov     al, [ds:si]
+    call    .is_terminator
+    jc      .ext_done_pfn
+    cmp     al, '.'
+    je      .ext_done_pfn
+    cmp     al, '*'
+    jne     .not_star_ext
+    mov     bh, 1
+.fill_q_ext:
+    mov     byte [es:di], '?'
+    inc     di
+    dec     cx
+    jnz     .fill_q_ext
+    inc     si
+    jmp     .ext_done_pfn
+
+.not_star_ext:
+    cmp     al, '?'
+    jne     .not_wild_ext
+    mov     bh, 1
+.not_wild_ext:
+    cmp     al, 'a'
+    jb      .store_ext_pfn
+    cmp     al, 'z'
+    ja      .store_ext_pfn
+    sub     al, 0x20
+.store_ext_pfn:
+    mov     [es:di], al
+    inc     di
+    inc     si
+    dec     cx
+    jnz     .ext_loop_pfn
+
+.ext_done_pfn:
+    pop     di
+    jmp     .done_pfn
+
+.no_ext_pfn:
+    ; No dot found - fill extension with spaces unless bit 3 set
+    test    bl, 0x08
+    jnz     .done_pfn
+    push    di
+    push    cx
+    add     di, 9
+    mov     cx, 3
+    mov     al, ' '
+    rep     stosb
+    pop     cx
+    pop     di
+
+.done_pfn:
+    ; Return AL = 0 (ok), 1 (wildcards), or 0xFF (bad drive)
+    mov     al, bh                  ; 0 or 1
+    ret
+
+; Helper: check if AL is a filename terminator
+; Output: CF set if terminator
+.is_terminator:
+    cmp     al, 0
+    je      .yes_term
+    cmp     al, 0x0D
+    je      .yes_term
+    cmp     al, ' '
+    je      .yes_term
+    cmp     al, 0x09                ; TAB
+    je      .yes_term
+    cmp     al, '/'
+    je      .yes_term
+    cmp     al, '\'
+    je      .yes_term
+    cmp     al, '['
+    je      .yes_term
+    cmp     al, ']'
+    je      .yes_term
+    cmp     al, '<'
+    je      .yes_term
+    cmp     al, '>'
+    je      .yes_term
+    cmp     al, '|'
+    je      .yes_term
+    cmp     al, '"'
+    je      .yes_term
+    cmp     al, ':'
+    je      .yes_term
+    cmp     al, ';'
+    je      .yes_term
+    cmp     al, ','
+    je      .yes_term
+    cmp     al, '='
+    je      .yes_term
+    cmp     al, '+'
+    je      .yes_term
+    clc
+    ret
+.yes_term:
+    stc
+    ret
+
+; ---------------------------------------------------------------------------
 ; int21_23 - FCB Get File Size
 ; Input: DS:DX = FCB pointer
 ; Output: AL = 00h if successful, FFh if file not found

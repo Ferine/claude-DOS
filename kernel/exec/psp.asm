@@ -79,6 +79,26 @@ build_psp:
 .tail_done:
     mov     byte [es:di], 0x0D ; Terminate with CR
     mov     [es:0x80], cl       ; Store length
-    
+
+    ; Parse command tail to fill FCB1 (PSP:5Ch) and FCB2 (PSP:6Ch)
+    ; DS:SI = command tail source (pointing past what we copied)
+    ; Need to re-point SI at PSP:0081 (the copy we just wrote)
+    push    ds
+    push    es
+    pop     ds                  ; DS = PSP segment (same as ES)
+    mov     si, 0x0081          ; DS:SI = command tail in PSP
+
+    ; Parse first argument into FCB1 at ES:005Ch
+    mov     di, 0x005C
+    mov     al, 0x01            ; Skip leading separators
+    call    parse_filename_core
+
+    ; Parse second argument into FCB2 at ES:006Ch
+    mov     di, 0x006C
+    mov     al, 0x01            ; Skip leading separators
+    call    parse_filename_core
+
+    pop     ds                  ; Restore original DS
+
     popa
     ret

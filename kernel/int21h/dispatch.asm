@@ -256,7 +256,7 @@ int21_table:
     dw      0                   ; 26h - Create PSP
     dw      0                   ; 27h - Random block read (FCB)
     dw      0                   ; 28h - Random block write (FCB)
-    dw      0                   ; 29h - Parse filename
+    dw      int21_29            ; 29h - Parse filename
     dw      int21_2A            ; 2Ah - Get date
     dw      int21_2B            ; 2Bh - Set date
     dw      int21_2C            ; 2Ch - Get time

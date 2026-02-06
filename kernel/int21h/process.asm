@@ -2,9 +2,23 @@
 ; claudeDOS INT 21h Process Functions
 ; ===========================================================================
 
-; AH=4Bh - EXEC (Load and Execute Program)
-; Input: DS:DX = ASCIIZ program name, ES:BX = parameter block
+; AH=4Bh - EXEC (Load and Execute Program / Load Overlay)
+; Input: AL = subfunction (00h = load+exec, 03h = load overlay)
+;        DS:DX = ASCIIZ program name, ES:BX = parameter block
 int21_4B:
+    ; Check subfunction
+    mov     al, [save_ax]
+    cmp     al, 0x03
+    je      int21_4B_overlay
+    cmp     al, 0x00
+    jne     .bad_subfunc
+    jmp     .do_exec
+
+.bad_subfunc:
+    mov     ax, ERR_INVALID_FUNC
+    jmp     dos_set_error
+
+.do_exec:
     ; Save parent context
     mov     [exec_parent_ss], ss
     mov     [exec_parent_sp], sp
@@ -85,7 +99,11 @@ int21_4B:
 .exec_drive_upper:
     sub     al, 'A'             ; AL = drive number
     call    fat_set_active_drive
+    jmp     .exec_drive_set
 .exec_no_drive:
+    mov     al, [current_drive]
+    call    fat_set_active_drive
+.exec_drive_set:
 
     ; Find the file to get its size
     mov     si, exec_fcb_name
@@ -268,7 +286,9 @@ int21_4B:
     pop     es
     mov     di, exec_filename       ; ES:DI = program filename
     call    env_create_with_path
-    jc      .env_alloc_fail_early
+    jnc     .env_ok
+    jmp     .env_alloc_fail_early
+.env_ok:
 
     ; AX = new environment segment
     mov     [exec_child_env], ax
@@ -307,6 +327,16 @@ int21_4B:
     call    mcb_alloc
     jc      .exec_no_mem_free_env
 .alloc_ok:
+    ; AX = child segment (after MCB header)
+    ; Fix MCB owner: mcb_alloc set owner to current_psp (parent/shell),
+    ; but int21_4C frees by child PSP. Update MCB owner to child segment.
+    push    es
+    push    ax
+    dec     ax                      ; AX = MCB segment (one para before block)
+    mov     es, ax
+    pop     ax                      ; AX = child segment again
+    mov     [es:1], ax              ; Set MCB owner to child PSP segment
+    pop     es
 
     ; DEBUG: print returned segment
     cmp     byte [cs:debug_trace], 0
@@ -654,6 +684,132 @@ int21_4B:
     pop     ax
     ret
 
+
+; ---------------------------------------------------------------------------
+; int21_4B_overlay - EXEC subfunction AL=03h: Load Overlay
+; Input: DS:DX = ASCIIZ filename (caller's DS:DX)
+;        ES:BX = parameter block:
+;          +00h word: load segment
+;          +02h word: relocation factor (ignored for raw overlays)
+; Output: CF=0 success, CF=1 error (AX=error code)
+; ---------------------------------------------------------------------------
+int21_4B_overlay:
+    push    si
+    push    di
+    push    bp
+
+    ; Copy filename from caller's DS:DX to exec_filename
+    push    es
+    mov     ds, [cs:save_ds]
+    mov     si, [cs:save_dx]
+    push    cs
+    pop     es
+    mov     di, exec_filename
+    mov     cx, 127
+.ovl_copy_fn:
+    lodsb
+    stosb
+    test    al, al
+    jz      .ovl_fn_done
+    loop    .ovl_copy_fn
+    mov     byte [es:di], 0
+.ovl_fn_done:
+    pop     es
+
+    push    cs
+    pop     ds                      ; DS = kernel
+
+    ; Read load_segment from caller's param block
+    push    es
+    mov     es, [save_es]
+    mov     bx, [save_bx]
+    mov     ax, [es:bx + 0]        ; Load segment
+    mov     [.ovl_load_seg], ax
+    mov     ax, [es:bx + 2]        ; Relocation factor (saved but unused for raw)
+    mov     [.ovl_reloc_factor], ax
+    pop     es
+
+    ; Resolve path to find the file
+    mov     si, exec_filename
+    call    resolve_path
+    jc      .ovl_not_found
+
+    ; AX = directory cluster, fcb_name_buffer = filename
+    ; Search for the file in that directory
+    mov     si, fcb_name_buffer
+    call    fat_find_in_directory
+    jc      .ovl_not_found
+
+    ; DI = directory entry in disk_buffer
+    ; Get starting cluster and file size
+    mov     ax, [di + 26]           ; Start cluster
+    mov     [.ovl_start_cluster], ax
+    mov     ax, [di + 28]           ; File size low
+    mov     [.ovl_file_size], ax
+
+    ; Load file cluster by cluster into load_segment:0000
+    mov     ax, [.ovl_start_cluster]
+    mov     es, [.ovl_load_seg]
+    xor     bx, bx                  ; Start at offset 0
+
+.ovl_load_loop:
+    cmp     ax, 2
+    jb      .ovl_load_done
+    cmp     ax, [fat_eoc_min]
+    jae     .ovl_load_done
+
+    push    ax
+    call    fat_cluster_to_lba
+    call    fat_read_sector
+    pop     ax
+    jc      .ovl_read_error
+
+    add     bx, 512
+    jnc     .ovl_no_seg_wrap
+    ; BX wrapped around, advance ES by 0x1000 (64KB / 16)
+    mov     cx, es
+    add     cx, 0x1000
+    mov     es, cx
+.ovl_no_seg_wrap:
+
+    ; Get next cluster
+    call    fat_get_next_cluster
+    jmp     .ovl_load_loop
+
+.ovl_load_done:
+    ; Restore ES = kernel
+    push    cs
+    pop     es
+    call    dos_clear_error
+    pop     bp
+    pop     di
+    pop     si
+    ret
+
+.ovl_not_found:
+    push    cs
+    pop     es
+    mov     ax, ERR_FILE_NOT_FOUND
+    jmp     .ovl_error_ret
+
+.ovl_read_error:
+    push    cs
+    pop     es
+    mov     ax, ERR_READ_FAULT
+
+.ovl_error_ret:
+    call    dos_set_error
+    pop     bp
+    pop     di
+    pop     si
+    ret
+
+; Local data for overlay loading
+.ovl_load_seg       dw  0
+.ovl_reloc_factor   dw  0
+.ovl_start_cluster  dw  0
+.ovl_file_size      dw  0
+
 ; AH=4Ch - Terminate with Return Code
 ; Input: AL = return code
 int21_4C:
@@ -702,7 +858,21 @@ int21_4C:
     mov     word [es:1], 0          ; Free it
 .free_done:
     pop     bx                      ; BX = parent PSP
+    jmp     terminate_common
 
+.halt_system:
+    mov     si, msg_prog_exit
+    call    bios_print_string
+    cli
+    hlt
+    ret
+
+; ---------------------------------------------------------------------------
+; terminate_common - Shared tail for AH=4Ch and AH=31h
+; Input: BX = parent PSP segment
+; Restores IVT vectors, parent stack, parent register save area
+; ---------------------------------------------------------------------------
+terminate_common:
     ; Restore INT 22h/23h/24h from child PSP back to IVT
     mov     es, [current_psp]       ; Child PSP
     push    ds
@@ -758,13 +928,6 @@ int21_4C:
     call    dos_clear_error
     ret
 
-.halt_system:
-    mov     si, msg_prog_exit
-    call    bios_print_string
-    cli
-    hlt
-    ret
-
 ; AH=4Dh - Get Return Code
 ; Output: AX = return code (AL=code, AH=termination type)
 int21_4D:
@@ -775,12 +938,76 @@ int21_4D:
     ret
 
 ; AH=31h - Terminate and Stay Resident (TSR)
-; Input: AL = return code, DX = paragraphs to keep
+; Input: AL = return code, DX = paragraphs to keep resident
 int21_31:
-    ; Stub
+    ; Save return code
     mov     al, [save_ax]
     xor     ah, ah
     mov     [return_code], ax
+
+    ; Get current PSP and parent PSP
+    mov     ax, [current_psp]
+    mov     es, ax
+    mov     bx, [es:0x16]          ; Parent PSP segment
+
+    ; If parent == current (shell trying to TSR), halt
+    cmp     bx, ax
+    je      .tsr_halt
+
+    ; DX = paragraphs to keep resident (from caller)
+    mov     dx, [save_dx]
+
+    ; Resize the program's MCB to DX paragraphs
+    ; ES = current_psp (the block to resize)
+    push    bx                      ; Save parent PSP
+    mov     bx, dx                  ; BX = new size in paragraphs
+    call    mcb_resize
+    ; Ignore resize failure - still terminate
+
+    ; Walk MCB chain and free all blocks owned by child PSP
+    ; EXCEPT the program's own MCB (the one we just resized)
+    mov     dx, [current_psp]       ; DX = child PSP (owner to free)
+    mov     ax, [mcb_chain_start]
+.tsr_free_loop:
+    mov     es, ax
+
+    ; Check signature
+    cmp     byte [es:0], 'M'
+    je      .tsr_check_owner
+    cmp     byte [es:0], 'Z'
+    je      .tsr_check_owner_last
+    jmp     .tsr_free_done          ; Invalid MCB, stop
+
+.tsr_check_owner:
+    cmp     [es:1], dx              ; Owned by child?
+    jne     .tsr_next_mcb
+    ; Check if this is the program's own block (segment after MCB == child PSP)
+    mov     cx, ax
+    inc     cx                      ; CX = block segment (after MCB)
+    cmp     cx, dx                  ; Is it the program's own block?
+    je      .tsr_next_mcb           ; Yes, keep it resident
+    mov     word [es:1], 0          ; Free it (environment, etc.)
+.tsr_next_mcb:
+    mov     cx, [es:3]
+    inc     cx
+    add     ax, cx                  ; Next MCB = current + 1 + size
+    jmp     .tsr_free_loop
+
+.tsr_check_owner_last:
+    cmp     [es:1], dx
+    jne     .tsr_free_done
+    mov     cx, ax
+    inc     cx
+    cmp     cx, dx
+    je      .tsr_free_done          ; Program's own block, keep it
+    mov     word [es:1], 0          ; Free it
+.tsr_free_done:
+    pop     bx                      ; BX = parent PSP
+    jmp     terminate_common
+
+.tsr_halt:
+    mov     si, msg_prog_exit
+    call    bios_print_string
     cli
     hlt
     ret
