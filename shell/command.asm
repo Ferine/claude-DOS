@@ -187,6 +187,11 @@ cmd_loop:
     xor     al, al
     rep     stosb               ; Clear from CR to end of buffer
 
+    ; Check for pipe operator before redirection parsing
+    call    check_pipe
+    test    al, al
+    jnz     cmd_loop            ; Pipe handler executed both sides
+
     ; Parse redirection operators (>, >>, <)
     call    parse_redirection
 

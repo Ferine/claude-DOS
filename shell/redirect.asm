@@ -318,3 +318,275 @@ cleanup_redirection:
     ret
 
 redir_err_msg   db  'Error setting up redirection', 0x0D, 0x0A, '$'
+
+; ===========================================================================
+; Pipe Support
+; Implements: cmd1 | cmd2 [| cmd3 ...]  using temporary files
+; ===========================================================================
+
+; Pipe state
+pipe_tempfile   db  '\AZPIPE$.$$$', 0
+pipe_saved_stdout dw 0xFFFF
+pipe_saved_stdin  dw 0xFFFF
+pipe_temp_handle  dw 0xFFFF
+
+; Buffer to hold the right side of a pipe (may contain more pipes)
+pipe_right_buf  times 130 db 0
+
+; ---------------------------------------------------------------------------
+; check_pipe - Scan cmd_buffer for a pipe character and handle it
+; Output: AL = 1 if pipe was found and handled, 0 if no pipe
+; ---------------------------------------------------------------------------
+check_pipe:
+    push    bx
+    push    cx
+    push    dx
+    push    si
+    push    di
+
+    ; Scan cmd_buffer+2 for '|' not inside quotes
+    mov     si, cmd_buffer + 2
+    xor     cl, cl              ; Quote state: 0 = not in quotes
+.scan:
+    lodsb
+    test    al, al
+    jz      .no_pipe
+    cmp     al, '"'
+    jne     .not_quote
+    xor     cl, 1               ; Toggle quote state
+    jmp     .scan
+.not_quote:
+    test    cl, cl
+    jnz     .scan               ; Inside quotes - skip
+    cmp     al, '|'
+    je      .found_pipe
+    jmp     .scan
+
+.no_pipe:
+    pop     di
+    pop     si
+    pop     dx
+    pop     cx
+    pop     bx
+    xor     al, al              ; Return 0 - no pipe
+    ret
+
+.found_pipe:
+    ; SI points one past the '|'. Split the command here.
+    ; Null-terminate the left command (replace '|' with 0)
+    mov     byte [si - 1], 0
+
+    ; Copy right side (SI onward) to pipe_right_buf
+    mov     di, pipe_right_buf
+.copy_right:
+    lodsb
+    stosb
+    test    al, al
+    jnz     .copy_right
+
+    ; --- Execute left command with stdout redirected to temp file ---
+
+    ; Create the temp file
+    mov     dx, pipe_tempfile
+    xor     cx, cx              ; Normal attributes
+    mov     ah, 0x3C            ; Create file
+    int     0x21
+    jc      .pipe_error
+    mov     [pipe_temp_handle], ax
+
+    ; Save original stdout (dup handle 1)
+    mov     bx, 1
+    mov     ah, 0x45            ; Dup
+    int     0x21
+    jc      .pipe_close_temp
+    mov     [pipe_saved_stdout], ax
+
+    ; Redirect stdout to temp file (force dup temp handle onto handle 1)
+    mov     bx, [pipe_temp_handle]
+    mov     cx, 1               ; Target: stdout
+    mov     ah, 0x46            ; ForceDup
+    int     0x21
+    jc      .pipe_restore_stdout
+
+    ; Close our copy of the temp handle (stdout now points to the file)
+    mov     bx, [pipe_temp_handle]
+    mov     ah, 0x3E
+    int     0x21
+
+    ; Dispatch left command (cmd_buffer+2 still has the left side)
+    call    dispatch_single_cmd
+
+    ; Restore original stdout
+    mov     bx, [pipe_saved_stdout]
+    mov     cx, 1
+    mov     ah, 0x46            ; ForceDup saved handle onto handle 1
+    int     0x21
+    ; Close saved stdout handle
+    mov     bx, [pipe_saved_stdout]
+    mov     ah, 0x3E
+    int     0x21
+    mov     word [pipe_saved_stdout], 0xFFFF
+
+    ; --- Execute right command with stdin redirected from temp file ---
+
+    ; Open temp file for reading
+    mov     dx, pipe_tempfile
+    mov     ax, 0x3D00          ; Open read-only
+    int     0x21
+    jc      .pipe_delete
+    mov     [pipe_temp_handle], ax
+
+    ; Save original stdin (dup handle 0)
+    mov     bx, 0
+    mov     ah, 0x45
+    int     0x21
+    jc      .pipe_close_input
+    mov     [pipe_saved_stdin], ax
+
+    ; Redirect stdin from temp file (force dup onto handle 0)
+    mov     bx, [pipe_temp_handle]
+    mov     cx, 0               ; Target: stdin
+    mov     ah, 0x46
+    int     0x21
+    jc      .pipe_restore_stdin
+
+    ; Close our copy of the temp handle (stdin now points to the file)
+    mov     bx, [pipe_temp_handle]
+    mov     ah, 0x3E
+    int     0x21
+
+    ; Copy right side into cmd_buffer for dispatch
+    mov     si, pipe_right_buf
+    mov     di, cmd_buffer + 2
+    xor     cl, cl              ; Length counter
+.copy_to_buf:
+    lodsb
+    stosb
+    test    al, al
+    jz      .copy_done
+    inc     cl
+    jmp     .copy_to_buf
+.copy_done:
+    mov     [cmd_buffer + 1], cl
+
+    ; Check if the right side itself contains a pipe (chained pipes)
+    call    check_pipe
+    test    al, al
+    jnz     .right_had_pipe
+
+    ; No more pipes - dispatch right command normally
+    call    dispatch_single_cmd
+
+.right_had_pipe:
+    ; Restore original stdin
+    mov     bx, [pipe_saved_stdin]
+    mov     cx, 0
+    mov     ah, 0x46
+    int     0x21
+    ; Close saved stdin handle
+    mov     bx, [pipe_saved_stdin]
+    mov     ah, 0x3E
+    int     0x21
+    mov     word [pipe_saved_stdin], 0xFFFF
+
+.pipe_delete:
+    ; Delete the temp file
+    mov     dx, pipe_tempfile
+    mov     ah, 0x41            ; Delete file
+    int     0x21
+
+    pop     di
+    pop     si
+    pop     dx
+    pop     cx
+    pop     bx
+    mov     al, 1               ; Return 1 - pipe was handled
+    ret
+
+.pipe_restore_stdin:
+    mov     bx, [pipe_saved_stdin]
+    mov     cx, 0
+    mov     ah, 0x46
+    int     0x21
+    mov     bx, [pipe_saved_stdin]
+    mov     ah, 0x3E
+    int     0x21
+    mov     word [pipe_saved_stdin], 0xFFFF
+.pipe_close_input:
+    mov     bx, [pipe_temp_handle]
+    mov     ah, 0x3E
+    int     0x21
+    jmp     .pipe_delete
+
+.pipe_restore_stdout:
+    mov     bx, [pipe_saved_stdout]
+    mov     cx, 1
+    mov     ah, 0x46
+    int     0x21
+    mov     bx, [pipe_saved_stdout]
+    mov     ah, 0x3E
+    int     0x21
+    mov     word [pipe_saved_stdout], 0xFFFF
+.pipe_close_temp:
+    mov     bx, [pipe_temp_handle]
+    mov     ah, 0x3E
+    int     0x21
+.pipe_error:
+    ; Print pipe error message
+    push    cs
+    pop     ds
+    mov     dx, pipe_err_msg
+    mov     ah, 0x09
+    int     0x21
+
+    pop     di
+    pop     si
+    pop     dx
+    pop     cx
+    pop     bx
+    mov     al, 1               ; Return handled (with error)
+    ret
+
+pipe_err_msg    db  'Error in pipe', 0x0D, 0x0A, '$'
+
+; ---------------------------------------------------------------------------
+; dispatch_single_cmd - Execute a single command from cmd_buffer
+; Handles redirection parsing, drive changes, internal + external commands
+; ---------------------------------------------------------------------------
+dispatch_single_cmd:
+    pusha
+
+    ; Parse redirection operators
+    call    parse_redirection
+
+    ; Point to command text
+    mov     si, cmd_buffer + 2
+    call    skip_spaces
+
+    ; Check for empty
+    cmp     byte [si], 0
+    je      .disp_done
+
+    ; Check for drive change
+    call    try_drive_change
+    test    al, al
+    jnz     .disp_done
+
+    ; Set up redirection
+    call    setup_redirection
+    jc      .disp_done
+
+    ; Try internal commands
+    call    try_internal_cmd
+    test    al, al
+    jnz     .disp_cmd_done
+
+    ; Try external command
+    call    try_external_cmd
+
+.disp_cmd_done:
+    call    cleanup_redirection
+
+.disp_done:
+    popa
+    ret

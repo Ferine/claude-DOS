@@ -308,11 +308,11 @@ int21_table:
     dw      int21_21            ; 21h - Random read (FCB)
     dw      int21_22            ; 22h - Random write (FCB)
     dw      int21_23            ; 23h - Get file size (FCB)
-    dw      0                   ; 24h - Set random record (FCB)
+    dw      int21_24            ; 24h - Set random record (FCB)
     dw      int21_25            ; 25h - Set interrupt vector
-    dw      0                   ; 26h - Create PSP
-    dw      0                   ; 27h - Random block read (FCB)
-    dw      0                   ; 28h - Random block write (FCB)
+    dw      int21_26            ; 26h - Create PSP
+    dw      int21_27            ; 27h - Random block read (FCB)
+    dw      int21_28            ; 28h - Random block write (FCB)
     dw      int21_29            ; 29h - Parse filename
     dw      int21_2A            ; 2Ah - Get date
     dw      int21_2B            ; 2Bh - Set date

@@ -395,11 +395,15 @@ int21_3C_common:
     mov     [di + 18], ax           ; Reserved
     mov     [di + 20], ax           ; Reserved
 
-    ; Set time/date to 0 (could set to current time if we had RTC)
-    mov     [di + 22], ax           ; Time
-    mov     [di + 24], ax           ; Date
+    ; Set time/date from RTC
+    push    di
+    call    get_dos_datetime        ; CX = packed time, DX = packed date
+    pop     di
+    mov     [di + 22], cx           ; Time
+    mov     [di + 24], dx           ; Date
 
     ; First cluster = 0 (no data yet)
+    xor     ax, ax
     mov     [di + 26], ax
 
     ; File size = 0
@@ -456,6 +460,13 @@ int21_3C_common:
     mov     [di + 28], ax           ; Size low = 0
     mov     [di + 30], ax           ; Size high = 0
 
+    ; Update timestamp on truncate
+    push    di
+    call    get_dos_datetime        ; CX = packed time, DX = packed date
+    pop     di
+    mov     [di + 22], cx           ; Time
+    mov     [di + 24], dx           ; Date
+
     ; Write directory sector back
     push    cs
     pop     es
@@ -484,8 +495,13 @@ int21_3C_common:
     mov     byte [di + SFT_ENTRY.attr], 0
     mov     word [di + SFT_ENTRY.first_cluster], 0
     mov     word [di + SFT_ENTRY.cur_cluster], 0
-    mov     word [di + SFT_ENTRY.time], 0
-    mov     word [di + SFT_ENTRY.date], 0
+
+    ; Set SFT time/date from RTC
+    push    di
+    call    get_dos_datetime        ; CX = packed time, DX = packed date
+    pop     di
+    mov     [di + SFT_ENTRY.time], cx
+    mov     [di + SFT_ENTRY.date], dx
     mov     word [di + SFT_ENTRY.file_size], 0
     mov     word [di + SFT_ENTRY.file_size + 2], 0
     mov     word [di + SFT_ENTRY.file_pos], 0
@@ -1457,6 +1473,16 @@ int21_40:
     mov     [bx + 28], ax
     mov     ax, [cs:bp + SFT_ENTRY.file_size + 2]
     mov     [bx + 30], ax
+
+    ; Update modification timestamp from RTC
+    push    bx
+    call    get_dos_datetime        ; CX = packed time, DX = packed date
+    pop     bx
+    mov     [bx + 22], cx           ; Time
+    mov     [bx + 24], dx           ; Date
+    ; Also update SFT entry
+    mov     [cs:bp + SFT_ENTRY.time], cx
+    mov     [cs:bp + SFT_ENTRY.date], dx
 
     ; Write sector back
     push    cs
@@ -3117,8 +3143,15 @@ int21_6C:
     mov     [di + 16], ax
     mov     [di + 18], ax
     mov     [di + 20], ax
-    mov     [di + 22], ax
-    mov     [di + 24], ax
+
+    ; Set time/date from RTC
+    push    di
+    call    get_dos_datetime        ; CX = packed time, DX = packed date
+    pop     di
+    mov     [di + 22], cx           ; Time
+    mov     [di + 24], dx           ; Date
+
+    xor     ax, ax
     mov     [di + 26], ax
     mov     [di + 28], ax
     mov     [di + 30], ax
@@ -3276,6 +3309,101 @@ int21_6C:
 ; Local data for extended open
 .ext_action     db  0
 .ext_dir_cluster dw 0
+
+; ---------------------------------------------------------------------------
+; get_dos_datetime - Read RTC and return DOS-format packed time/date
+; Output: CX = packed time (hours*2048 + minutes*32 + seconds/2)
+;         DX = packed date ((year-1980)*512 + month*32 + day)
+; Clobbers: AX
+; ---------------------------------------------------------------------------
+get_dos_datetime:
+    push    bx
+
+    ; Read RTC time: CH=hours(BCD), CL=minutes(BCD), DH=seconds(BCD)
+    mov     ah, 0x02
+    int     0x1A
+    jc      .gdt_fallback
+
+    ; Save BCD values
+    mov     [cs:.gdt_hours], ch
+    mov     [cs:.gdt_minutes], cl
+    mov     [cs:.gdt_seconds], dh
+
+    ; Read RTC date: CH=century(BCD), CL=year(BCD), DH=month(BCD), DL=day(BCD)
+    mov     ah, 0x04
+    int     0x1A
+    jc      .gdt_fallback
+
+    mov     [cs:.gdt_year], cl
+    mov     [cs:.gdt_month], dh
+    mov     [cs:.gdt_day], dl
+
+    ; Convert hours BCD -> binary
+    mov     al, [cs:.gdt_hours]
+    call    bcd_to_bin
+    xor     ah, ah
+    mov     bx, ax                  ; BX = hours
+
+    ; Pack time: hours*2048
+    shl     bx, 11                  ; BX = hours << 11
+
+    ; Convert minutes BCD -> binary
+    mov     al, [cs:.gdt_minutes]
+    call    bcd_to_bin
+    xor     ah, ah
+    shl     ax, 5                   ; AX = minutes << 5
+    or      bx, ax                  ; BX |= minutes << 5
+
+    ; Convert seconds BCD -> binary
+    mov     al, [cs:.gdt_seconds]
+    call    bcd_to_bin
+    xor     ah, ah
+    shr     ax, 1                   ; AX = seconds / 2
+    or      bx, ax                  ; BX |= seconds / 2
+
+    mov     cx, bx                  ; CX = packed time
+
+    ; Convert year BCD -> binary (2-digit, assume 2000s: add 20 for DOS offset)
+    mov     al, [cs:.gdt_year]
+    call    bcd_to_bin
+    xor     ah, ah
+    add     ax, 20                  ; year_since_1980 = year_2digit + 20
+
+    ; Pack date: (year-1980)*512
+    shl     ax, 9                   ; AX = year_since_1980 << 9
+    mov     dx, ax                  ; DX = year part
+
+    ; Convert month BCD -> binary
+    mov     al, [cs:.gdt_month]
+    call    bcd_to_bin
+    xor     ah, ah
+    shl     ax, 5                   ; AX = month << 5
+    or      dx, ax                  ; DX |= month << 5
+
+    ; Convert day BCD -> binary
+    mov     al, [cs:.gdt_day]
+    call    bcd_to_bin
+    xor     ah, ah
+    or      dx, ax                  ; DX |= day
+
+    pop     bx
+    ret
+
+.gdt_fallback:
+    ; RTC not available - return a fixed date/time
+    ; 2025-01-01 00:00:00 -> date=(45*512)+(1*32)+1=23073, time=0
+    xor     cx, cx
+    mov     dx, (45 << 9) | (1 << 5) | 1
+    pop     bx
+    ret
+
+; Local storage for get_dos_datetime
+.gdt_hours      db  0
+.gdt_minutes    db  0
+.gdt_seconds    db  0
+.gdt_year       db  0
+.gdt_month      db  0
+.gdt_day        db  0
 
 ; ---------------------------------------------------------------------------
 ; File I/O local data

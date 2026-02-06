@@ -29,8 +29,26 @@ int21_36:
     push    si
     push    di
 
-    ; TODO: Handle drive selection from DL (currently only supports default drive)
+    ; Handle drive selection from DL
+    mov     al, [save_dx]               ; AL = DL (drive: 0=default, 1=A:, 2=B:, etc)
+    test    al, al
+    jz      .use_current_36             ; DL=0 means use current drive
 
+    ; DL != 0: switch to specified drive (DL-1 = 0-based drive number)
+    dec     al                          ; Convert 1-based to 0-based
+    cmp     al, LASTDRIVE
+    jae     .invalid_drive_36
+
+    ; Save current drive state and switch
+    call    fat_save_drive
+    call    fat_set_active_drive
+    mov     byte [.drive_switched_36], 1
+    jmp     .do_query_36
+
+.use_current_36:
+    mov     byte [.drive_switched_36], 0
+
+.do_query_36:
     ; Get values from DPB via active_dpb pointer
     push    bx
     mov     bx, [active_dpb]
@@ -90,7 +108,23 @@ int21_36:
 .use_cached:
     mov     [save_bx], ax               ; BX = free clusters
 
+    ; Restore drive if we switched
+    cmp     byte [.drive_switched_36], 0
+    je      .no_restore_36
+    call    fat_restore_drive
+.no_restore_36:
+
     pop     di
     pop     si
     call    dos_clear_error
     ret
+
+.invalid_drive_36:
+    mov     word [save_ax], 0xFFFF      ; AX = FFFFh = invalid drive
+    pop     di
+    pop     si
+    call    dos_clear_error
+    ret
+
+; Local flag for drive switch tracking
+.drive_switched_36  db  0

@@ -178,66 +178,254 @@ int21_09:
     ret
 
 ; ---------------------------------------------------------------------------
-; INT 21h AH=0Ah - Buffered Input
+; INT 21h AH=0Ah - Buffered Input with Line Editing
 ; Input: DS:DX = pointer to input buffer
 ;   Buffer[0] = max chars, Buffer[1] = filled by DOS with count
 ;   Buffer[2..] = input string
+;
+; Supports: Backspace, Delete, Left/Right arrows, Home, End, Escape
 ; ---------------------------------------------------------------------------
 int21_0A:
     push    es
     push    di
+    push    bp
 
     mov     es, [save_ds]
     mov     di, [save_dx]
 
-    xor     cl, cl              ; Character count
-    mov     ch, [es:di]         ; Max characters
+    xor     cl, cl              ; CL = total length of text in buffer
+    xor     dl, dl              ; DL = cursor position (offset within buffer)
+    mov     ch, [es:di]         ; CH = max characters
 
 .input_loop:
-    ; Get a keystroke
+    ; Get a keystroke via BIOS
     xor     ah, ah
     int     0x16
+    ; AL = ASCII code (0 if extended key), AH = scan code
 
-    cmp     al, 0x0D            ; Enter?
+    ; Check for Enter
+    cmp     al, 0x0D
     je      .input_done
 
-    cmp     al, 0x08            ; Backspace?
+    ; Check for Escape
+    cmp     al, 0x1B
+    je      .escape
+
+    ; Check for Backspace
+    cmp     al, 0x08
     je      .backspace
 
-    ; Regular character
+    ; Check for extended key (AL=0 means scan code in AH)
+    test    al, al
+    jz      .extended_key
+
+    ; Printable character (AL >= 32)
+    cmp     al, 32
+    jb      .input_loop         ; Ignore other control chars
+
+    ; --- Insert printable character at cursor position ---
     cmp     cl, ch              ; Buffer full?
     jae     .input_loop         ; Ignore if full
 
-    ; Store and echo
+    ; Shift buffer right from cursor to end to make room
+    push    ax                  ; Save the character to insert
+    push    cx
+
+    ; Move bytes from position [cursor..length-1] one position right
+    ; Start from the end and work backwards
+    mov     bp, cx              ; BP = current length (loop counter source)
+    and     bp, 0x00FF          ; Clear high byte
+    xor     dh, dh
+    mov     bx, dx              ; BL = cursor pos
+    and     bx, 0x00FF
+.shift_right:
+    cmp     bp, bx              ; Reached cursor position?
+    jbe     .shift_right_done
+    ; Move byte at [bp-1] to [bp]
     push    bx
-    xor     bh, bh
-    mov     bl, cl
-    add     bl, 2               ; Skip max + count bytes
+    mov     bx, bp
+    add     bx, 2               ; Account for buffer header
+    mov     al, [es:di + bx - 1]
     mov     [es:di + bx], al
     pop     bx
-    inc     cl
+    dec     bp
+    jmp     .shift_right
+.shift_right_done:
+    pop     cx
+    pop     ax                  ; Restore character
 
-    ; Echo
-    mov     ah, 0x0E
-    xor     bx, bx
-    int     0x10
+    ; Store character at cursor position
+    push    bx
+    xor     bh, bh
+    mov     bl, dl              ; Cursor position
+    add     bl, 2
+    mov     [es:di + bx], al
+    pop     bx
+
+    inc     cl                  ; Increment length
+    inc     dl                  ; Advance cursor
+
+    ; Redraw from cursor-1 position to end, then reposition cursor
+    call    .redraw_from_cursor_minus1
     jmp     .input_loop
 
 .backspace:
-    test    cl, cl
-    jz      .input_loop         ; Nothing to delete
+    ; Delete character before cursor
+    test    dl, dl
+    jz      .input_loop         ; At start - nothing to delete
 
-    dec     cl
-    ; Echo backspace + space + backspace
+    dec     dl                  ; Move cursor left
+    ; Fall through to delete-at-cursor logic
+
+.delete_at_cursor:
+    ; Delete the character at current cursor position
+    ; Shift buffer left from cursor+1..length to cursor..length-1
+    cmp     dl, cl
+    jae     .input_loop         ; Cursor at or past end - nothing to delete
+
+    push    cx
+    xor     dh, dh
+    mov     bp, dx              ; BP = cursor position
+    and     bp, 0x00FF
+    mov     bx, cx
+    and     bx, 0x00FF          ; BX = length
+.shift_left:
+    inc     bp
+    cmp     bp, bx              ; Past end?
+    jae     .shift_left_done
+    ; Move byte at [bp] to [bp-1]
+    push    bx
+    mov     bx, bp
+    add     bx, 2
+    mov     al, [es:di + bx]
+    mov     [es:di + bx - 1], al
+    pop     bx
+    jmp     .shift_left
+.shift_left_done:
+    pop     cx
+    dec     cl                  ; Decrement length
+
+    ; Redraw the line from cursor position onward
+    call    .redraw_from_cursor
+    jmp     .input_loop
+
+.escape:
+    ; Clear the entire line
+    ; First move cursor to start visually
+    call    .visual_move_to_start
+    ; Print spaces to erase the entire line
+    push    cx
+    xor     bh, bh
+    mov     al, ' '
+    mov     ah, 0x0E
+    xor     ch, ch
+    mov     bp, cx              ; BP = length
+    and     bp, 0x00FF
+.erase_loop:
+    test    bp, bp
+    jz      .erase_done
+    int     0x10
+    dec     bp
+    jmp     .erase_loop
+.erase_done:
+    pop     cx
+    ; Move cursor back to start
+    push    cx
+    xor     ch, ch
+    mov     bp, cx
+    and     bp, 0x00FF
+    mov     al, 0x08
+    mov     ah, 0x0E
+    xor     bx, bx
+.back_loop:
+    test    bp, bp
+    jz      .back_done
+    int     0x10
+    dec     bp
+    jmp     .back_loop
+.back_done:
+    pop     cx
+    ; Reset length and cursor
+    xor     cl, cl
+    xor     dl, dl
+    jmp     .input_loop
+
+.extended_key:
+    ; AH has the scan code
+    cmp     ah, 0x4B            ; Left arrow
+    je      .left_arrow
+    cmp     ah, 0x4D            ; Right arrow
+    je      .right_arrow
+    cmp     ah, 0x47            ; Home
+    je      .home
+    cmp     ah, 0x4F            ; End
+    je      .end_key
+    cmp     ah, 0x53            ; Delete
+    je      .delete_key
+    jmp     .input_loop         ; Ignore other extended keys
+
+.left_arrow:
+    test    dl, dl
+    jz      .input_loop         ; Already at start
+    dec     dl
+    ; Move cursor left visually
     mov     ah, 0x0E
     xor     bx, bx
     mov     al, 0x08
     int     0x10
-    mov     al, ' '
-    int     0x10
-    mov     al, 0x08
-    int     0x10
     jmp     .input_loop
+
+.right_arrow:
+    cmp     dl, cl              ; At end of text?
+    jae     .input_loop         ; Can't go past end
+    ; Move cursor right visually - print the character under cursor
+    push    bx
+    xor     bh, bh
+    mov     bl, dl
+    add     bl, 2
+    mov     al, [es:di + bx]
+    pop     bx
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    inc     dl
+    jmp     .input_loop
+
+.home:
+    call    .visual_move_to_start
+    xor     dl, dl
+    jmp     .input_loop
+
+.end_key:
+    ; Print characters from cursor to end to move cursor right
+    push    cx
+    xor     dh, dh
+    mov     bp, dx
+    and     bp, 0x00FF          ; BP = current cursor pos
+    mov     bx, cx
+    and     bx, 0x00FF          ; BX = length
+.end_loop:
+    cmp     bp, bx
+    jae     .end_done
+    push    bx
+    mov     bx, bp
+    add     bx, 2
+    mov     al, [es:di + bx]
+    pop     bx
+    push    bx
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    pop     bx
+    inc     bp
+    jmp     .end_loop
+.end_done:
+    pop     cx
+    mov     dl, cl              ; Cursor at end
+    jmp     .input_loop
+
+.delete_key:
+    jmp     .delete_at_cursor
 
 .input_done:
     ; Store count
@@ -251,17 +439,156 @@ int21_0A:
     mov     byte [es:di + bx], 0x0D
     pop     bx
 
-    ; Echo CR+LF
-    mov     ah, 0x0E
-    xor     bx, bx
-    mov     al, 0x0D
-    int     0x10
-    mov     al, 0x0A
-    int     0x10
-
+    pop     bp
     pop     di
     pop     es
     call    dos_clear_error
+    ret
+
+; --- Helper: move visual cursor to start of input ---
+.visual_move_to_start:
+    push    cx
+    push    dx
+    xor     dh, dh
+    mov     bp, dx
+    and     bp, 0x00FF
+    mov     ah, 0x0E
+    xor     bx, bx
+    mov     al, 0x08
+.vms_loop:
+    test    bp, bp
+    jz      .vms_done
+    int     0x10
+    dec     bp
+    jmp     .vms_loop
+.vms_done:
+    pop     dx
+    pop     cx
+    ret
+
+; --- Helper: redraw from (cursor-1) position to end, reposition cursor ---
+; Used after inserting a character (cursor already advanced)
+.redraw_from_cursor_minus1:
+    push    cx
+    push    dx
+    ; Move visual cursor back one position
+    mov     ah, 0x0E
+    xor     bx, bx
+    mov     al, 0x08
+    int     0x10
+    ; Print from cursor-1 to end of buffer
+    xor     dh, dh
+    mov     bp, dx
+    and     bp, 0x00FF
+    dec     bp                  ; Start from cursor-1
+    mov     bx, cx
+    and     bx, 0x00FF          ; BX = length
+.rfcm1_print:
+    cmp     bp, bx
+    jae     .rfcm1_trail
+    push    bx
+    mov     bx, bp
+    add     bx, 2
+    mov     al, [es:di + bx]
+    pop     bx
+    push    bx
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    pop     bx
+    inc     bp
+    jmp     .rfcm1_print
+.rfcm1_trail:
+    ; Print one space to erase any leftover character
+    push    bx
+    mov     ah, 0x0E
+    xor     bx, bx
+    mov     al, ' '
+    int     0x10
+    pop     bx
+    ; Now move cursor back to correct position
+    ; Current visual pos is at (length + 1), need to be at cursor (dl)
+    ; Move back (length + 1 - cursor) positions
+    mov     bp, cx
+    and     bp, 0x00FF
+    inc     bp                  ; +1 for the trailing space
+    xor     dh, dh
+    push    dx
+    mov     bx, dx
+    and     bx, 0x00FF
+    sub     bp, bx              ; BP = distance to move back
+    mov     ah, 0x0E
+    xor     bx, bx
+    mov     al, 0x08
+.rfcm1_back:
+    test    bp, bp
+    jz      .rfcm1_done
+    int     0x10
+    dec     bp
+    jmp     .rfcm1_back
+.rfcm1_done:
+    pop     dx
+    pop     dx
+    pop     cx
+    ret
+
+; --- Helper: redraw from cursor position to end, reposition cursor ---
+; Used after deleting a character
+.redraw_from_cursor:
+    push    cx
+    push    dx
+    ; Print from cursor to end of buffer
+    xor     dh, dh
+    mov     bp, dx
+    and     bp, 0x00FF
+    mov     bx, cx
+    and     bx, 0x00FF          ; BX = new length
+.rfc_print:
+    cmp     bp, bx
+    jae     .rfc_trail
+    push    bx
+    mov     bx, bp
+    add     bx, 2
+    mov     al, [es:di + bx]
+    pop     bx
+    push    bx
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    pop     bx
+    inc     bp
+    jmp     .rfc_print
+.rfc_trail:
+    ; Print one space to erase the old last character
+    push    bx
+    mov     ah, 0x0E
+    xor     bx, bx
+    mov     al, ' '
+    int     0x10
+    pop     bx
+    ; Move cursor back to correct position
+    ; Visual pos is at (length + 1), need cursor at dl
+    mov     bp, cx
+    and     bp, 0x00FF
+    inc     bp
+    xor     dh, dh
+    push    dx
+    mov     bx, dx
+    and     bx, 0x00FF
+    sub     bp, bx
+    mov     ah, 0x0E
+    xor     bx, bx
+    mov     al, 0x08
+.rfc_back:
+    test    bp, bp
+    jz      .rfc_done
+    int     0x10
+    dec     bp
+    jmp     .rfc_back
+.rfc_done:
+    pop     dx
+    pop     dx
+    pop     cx
     ret
 
 ; ---------------------------------------------------------------------------

@@ -2079,3 +2079,291 @@ int21_23:
     pop     si
     pop     es
     ret
+
+; ---------------------------------------------------------------------------
+; int21_24 - FCB Set Random Record
+; Input: DS:DX = opened FCB pointer
+; Sets the random record field from the sequential position:
+;   random_record = current_block * 128 + current_record
+; ---------------------------------------------------------------------------
+int21_24:
+    push    es
+    push    di
+    push    ax
+
+    ; Get FCB pointer
+    mov     es, [save_ds]
+    mov     di, [save_dx]           ; ES:DI = FCB
+
+    ; Calculate random record = current_block * 128 + current_record
+    mov     ax, [es:di + FCB_CUR_BLOCK]
+    mov     cl, 7
+    shl     ax, cl                  ; AX = current_block * 128
+    xor     ch, ch
+    mov     cl, [es:di + FCB_CUR_REC]
+    add     ax, cx                  ; AX = record number
+
+    ; Store in random record field (4 bytes, set high word to 0)
+    mov     [es:di + FCB_RAND_REC], ax
+    mov     word [es:di + FCB_RAND_REC + 2], 0
+
+    pop     ax
+    pop     di
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; int21_27 - FCB Random Block Read
+; Input: DS:DX = FCB pointer, CX = number of records to read
+; Output: AL = 0 success, 1 EOF no data, 3 partial at EOF
+;         CX = actual records read
+; Reads CX records starting from the random record position
+; ---------------------------------------------------------------------------
+int21_27:
+    push    es
+    push    si
+    push    di
+    push    bx
+    push    dx
+    push    bp
+
+    ; Get FCB pointer
+    mov     es, [save_ds]
+    mov     bp, [save_dx]           ; ES:BP = FCB
+
+    ; Get number of records to read
+    mov     cx, [save_cx]
+
+    ; Set sequential position from random record
+    ; current_block = random_record / 128, current_record = random_record % 128
+    mov     ax, [es:bp + FCB_RAND_REC]
+    mov     bl, al
+    and     bl, 0x7F                ; BL = random_record % 128
+    mov     cl, 7
+    shr     ax, cl                  ; AX = random_record / 128
+    mov     [es:bp + FCB_CUR_BLOCK], ax
+    mov     [es:bp + FCB_CUR_REC], bl
+
+    ; Read records in a loop
+    mov     cx, [save_cx]
+    xor     dx, dx                  ; DX = records successfully read
+    test    cx, cx
+    jz      .done_27_zero
+
+.read_loop_27:
+    push    cx
+    push    dx
+
+    ; Call the sequential read handler (int21_14)
+    call    int21_14
+
+    pop     dx
+    pop     cx
+
+    ; Check result in save_ax (AL)
+    cmp     byte [save_ax], 0
+    je      .read_ok_27
+    cmp     byte [save_ax], 3
+    je      .read_partial_27
+    ; EOF or error - stop
+    jmp     .read_stop_27
+
+.read_ok_27:
+    inc     dx                      ; One more record read
+    dec     cx
+    jnz     .read_loop_27
+
+    ; All records read successfully
+    mov     [save_cx], dx
+    mov     byte [save_ax], 0       ; AL = 0 = success
+    jmp     .finish_27
+
+.read_partial_27:
+    inc     dx                      ; Count the partial record
+    mov     [save_cx], dx
+    mov     byte [save_ax], 3       ; AL = 3 = partial record
+    jmp     .finish_27
+
+.read_stop_27:
+    ; EOF before reading any/all records
+    mov     [save_cx], dx
+    test    dx, dx
+    jnz     .partial_eof_27
+    mov     byte [save_ax], 1       ; AL = 1 = EOF no data
+    jmp     .finish_27
+.partial_eof_27:
+    mov     byte [save_ax], 3       ; AL = 3 = partial
+
+.finish_27:
+    ; Update random record from final sequential position
+    mov     es, [save_ds]
+    mov     bp, [save_dx]
+    mov     ax, [es:bp + FCB_CUR_BLOCK]
+    mov     cl, 7
+    shl     ax, cl
+    xor     bh, bh
+    mov     bl, [es:bp + FCB_CUR_REC]
+    add     ax, bx
+    mov     [es:bp + FCB_RAND_REC], ax
+    mov     word [es:bp + FCB_RAND_REC + 2], 0
+
+    pop     bp
+    pop     dx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    ret
+
+.done_27_zero:
+    ; CX was 0 on entry
+    mov     word [save_cx], 0
+    mov     byte [save_ax], 0
+    jmp     .finish_27
+
+; ---------------------------------------------------------------------------
+; int21_28 - FCB Random Block Write
+; Input: DS:DX = FCB pointer, CX = number of records to write
+;        If CX=0, truncate file to random_record * record_size bytes
+; Output: AL = 0 success, 1 disk full, 2 error
+;         CX = actual records written
+; ---------------------------------------------------------------------------
+int21_28:
+    push    es
+    push    si
+    push    di
+    push    bx
+    push    dx
+    push    bp
+
+    ; Get FCB pointer
+    mov     es, [save_ds]
+    mov     bp, [save_dx]           ; ES:BP = FCB
+
+    ; Get number of records to write
+    mov     cx, [save_cx]
+
+    ; Check for CX=0 (truncate)
+    test    cx, cx
+    jz      .truncate_28
+
+    ; Set sequential position from random record
+    mov     ax, [es:bp + FCB_RAND_REC]
+    mov     bl, al
+    and     bl, 0x7F                ; BL = random_record % 128
+    mov     cl, 7
+    shr     ax, cl                  ; AX = random_record / 128
+    mov     [es:bp + FCB_CUR_BLOCK], ax
+    mov     [es:bp + FCB_CUR_REC], bl
+
+    ; Write records in a loop
+    mov     cx, [save_cx]
+    xor     dx, dx                  ; DX = records successfully written
+
+.write_loop_28:
+    push    cx
+    push    dx
+
+    ; Call the sequential write handler (int21_15)
+    call    int21_15
+
+    pop     dx
+    pop     cx
+
+    ; Check result
+    cmp     byte [save_ax], 0
+    jne     .write_stop_28
+
+    inc     dx                      ; One more record written
+    dec     cx
+    jnz     .write_loop_28
+
+    ; All records written successfully
+    mov     [save_cx], dx
+    mov     byte [save_ax], 0       ; AL = 0 = success
+    jmp     .finish_28
+
+.write_stop_28:
+    ; Disk full or error
+    mov     [save_cx], dx
+    ; save_ax already has the error code from int21_15
+
+.finish_28:
+    ; Update random record from final sequential position
+    mov     es, [save_ds]
+    mov     bp, [save_dx]
+    mov     ax, [es:bp + FCB_CUR_BLOCK]
+    mov     cl, 7
+    shl     ax, cl
+    xor     bh, bh
+    mov     bl, [es:bp + FCB_CUR_REC]
+    add     ax, bx
+    mov     [es:bp + FCB_RAND_REC], ax
+    mov     word [es:bp + FCB_RAND_REC + 2], 0
+
+    pop     bp
+    pop     dx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    ret
+
+.truncate_28:
+    ; CX=0: Set file size to random_record * record_size
+    mov     ax, [es:bp + FCB_RAND_REC]
+    mov     bx, [es:bp + FCB_REC_SIZE]
+    mul     bx                      ; DX:AX = new file size
+
+    ; Update FCB file size
+    mov     [es:bp + FCB_FILE_SIZE], ax
+    mov     [es:bp + FCB_FILE_SIZE + 2], dx
+
+    ; Update directory entry with new size
+    push    ax
+    push    dx
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    push    ax
+    mov     ax, [save_ds]
+    mov     es, ax
+    mov     ax, [es:bp + FCB_RESERVED + 2]  ; Dir sector
+    push    cs
+    pop     es
+    call    fat_read_sector
+    pop     ax
+    jc      .trunc_error_28
+
+    mov     es, [save_ds]
+    mov     di, [es:bp + FCB_RESERVED + 4]  ; Dir index
+    push    cs
+    pop     es
+    shl     di, 5
+    add     di, disk_buffer
+    pop     dx
+    pop     ax
+    mov     [di + 28], ax           ; Size low
+    mov     [di + 30], dx           ; Size high
+
+    ; Write directory back
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     es, [save_ds]
+    mov     ax, [es:bp + FCB_RESERVED + 2]
+    push    cs
+    pop     es
+    call    fat_write_sector
+    jc      .trunc_error_28_no_pop
+
+    mov     word [save_cx], 0
+    mov     byte [save_ax], 0       ; Success
+    jmp     .finish_28
+
+.trunc_error_28:
+    add     sp, 4                   ; Clean up pushed ax, dx
+.trunc_error_28_no_pop:
+    mov     word [save_cx], 0
+    mov     byte [save_ax], 2       ; Error
+    jmp     .finish_28

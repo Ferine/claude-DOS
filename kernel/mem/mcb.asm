@@ -66,6 +66,98 @@ mcb_alloc:
     push    si
     push    es
 
+    ; Check allocation strategy
+    cmp     byte [cs:alloc_strategy], 0
+    je      .first_fit
+
+    ; Best-fit (1) or Last-fit (2): scan entire chain first
+    mov     ax, [mcb_chain_start]
+    xor     dx, dx              ; Track largest free block
+    xor     si, si              ; SI = best candidate segment (0 = none)
+    mov     cx, 0xFFFF          ; CX = best candidate size (for best-fit)
+
+.strat_scan:
+    mov     es, ax
+
+    ; Verify valid MCB signature
+    cmp     byte [es:0], 'M'
+    je      .strat_sig_ok
+    cmp     byte [es:0], 'Z'
+    je      .strat_sig_ok
+    jmp     .no_memory
+
+.strat_sig_ok:
+    ; Check if block is free
+    cmp     word [es:1], 0
+    jne     .strat_next
+
+    ; Free block - get its size
+    push    cx
+    mov     cx, [es:3]
+
+    ; Track largest free block (for error reporting)
+    cmp     cx, dx
+    jbe     .strat_not_larger
+    mov     dx, cx
+.strat_not_larger:
+
+    ; Is it large enough?
+    cmp     cx, bx
+    jb      .strat_too_small
+
+    ; Block is large enough - check strategy
+    cmp     byte [cs:alloc_strategy], 2
+    je      .strat_last_fit
+
+    ; Best-fit: is this block smaller than current best?
+    pop     cx                  ; CX = current best size
+    push    cx
+    push    dx
+    mov     dx, [es:3]         ; DX = this block's size
+    cmp     dx, cx
+    jae     .strat_not_better  ; Not smaller, skip
+    ; New best candidate
+    mov     si, ax              ; SI = this block's segment
+    pop     dx
+    pop     cx
+    mov     cx, [es:3]         ; Update best size
+    jmp     .strat_next
+
+.strat_not_better:
+    pop     dx
+    jmp     .strat_too_small
+
+.strat_last_fit:
+    ; Last-fit: always update candidate
+    mov     si, ax              ; SI = this block's segment
+
+.strat_too_small:
+    pop     cx                  ; Restore best size
+
+.strat_next:
+    cmp     byte [es:0], 'Z'   ; Last block?
+    je      .strat_done
+
+    ; Next MCB = current + 1 + size
+    push    cx
+    mov     cx, [es:3]
+    inc     cx
+    add     ax, cx
+    pop     cx
+    jmp     .strat_scan
+
+.strat_done:
+    ; Did we find a candidate?
+    or      si, si
+    jz      .no_memory          ; No suitable block found
+
+    ; Set up for allocation: AX = candidate segment, ES = candidate segment
+    mov     ax, si
+    mov     es, ax
+    jmp     .found_block
+
+    ; --- First-fit strategy (strategy 0, original behavior) ---
+.first_fit:
     mov     ax, [mcb_chain_start]
     xor     dx, dx              ; Track largest free block
 
@@ -98,7 +190,7 @@ mcb_alloc:
 .next_block:
     cmp     byte [es:0], 'Z'   ; Last block?
     je      .no_memory
-    
+
     ; Next MCB = current + 1 + size
     mov     cx, [es:3]
     inc     cx                  ; +1 for MCB header

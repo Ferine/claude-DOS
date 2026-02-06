@@ -2,6 +2,43 @@
 ; claudeDOS INT 21h Process Functions
 ; ===========================================================================
 
+; AH=26h - Create New PSP
+; Input: DX = segment for new PSP
+; Copies current PSP to target segment and initializes it
+int21_26:
+    push    es
+    push    si
+    push    bx
+    push    dx
+
+    ; Get target segment from caller's DX
+    mov     ax, [save_dx]
+    mov     es, ax                  ; ES = target segment for new PSP
+
+    ; Set up parameters for build_psp:
+    ; DS:SI = pointer to empty command tail (just a 0 byte)
+    mov     si, .empty_tail_26
+
+    ; BX = environment segment from current PSP
+    push    es
+    mov     es, [current_psp]
+    mov     bx, [es:0x2C]          ; Environment segment from current PSP
+    pop     es
+
+    ; DX = parent PSP segment (current PSP)
+    mov     dx, [current_psp]
+
+    ; ES already set to target segment
+    call    build_psp
+
+    pop     dx
+    pop     bx
+    pop     si
+    pop     es
+    ret
+
+.empty_tail_26  db  0
+
 ; AH=4Bh - EXEC (Load and Execute Program / Load Overlay)
 ; Input: AL = subfunction (00h = load+exec, 03h = load overlay)
 ;        DS:DX = ASCIIZ program name, ES:BX = parameter block
