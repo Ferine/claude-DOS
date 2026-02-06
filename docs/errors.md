@@ -27,6 +27,8 @@ Format: `##XX##` where XX is the hex error code.
 | `##27##` | ERR_DISK_FULL | Disk full | No space on floppy | Floppy is 1.44MB max; remove files or use smaller data |
 | `##50##` | ERR_FILE_EXISTS | File exists | Create file that exists | Use open instead of create, or delete first |
 | `##52##` | ERR_CANNOT_MAKE | Cannot make | Directory creation failed | Parent directory doesn't exist or disk full |
+| `##53##` | ERR_FAIL_I24 | Fail on INT 24h | Critical error handler returned Fail | Check disk, retry operation |
+| `##57##` | ERR_INVALID_PARAM | Invalid parameter | Bad parameter to DOS function | Check register values passed to INT 21h |
 
 ## Runtime Error Patterns
 
@@ -86,11 +88,19 @@ When encountering a new error:
 3. Check serial output if available (`make run-serial`)
 4. Document the cause and solution here
 
+## INT 21h Function Quick Reference
+
+The dispatch table in `kernel/int21h/dispatch.asm` maps function numbers to handlers. Functions returning `dw 0` are unimplemented and return error 01h (invalid function).
+
 ## Quick Reference
 
 ```
-ERR_INVALID_HANDLE (06): File handle problem - check open/close pairs
 ERR_FILE_NOT_FOUND (02): Check filename and DIR listing
-ERR_INSUFFICIENT_MEM (08): Program too large
-ERR_INVALID_FORMAT (0B): Not a valid DOS executable
+ERR_PATH_NOT_FOUND (03): Directory doesn't exist
+ERR_INVALID_HANDLE (06): File handle problem - check open/close pairs
+ERR_MCB_DESTROYED  (07): Memory corruption - check for buffer overflows
+ERR_INSUFFICIENT_MEM (08): Program too large or memory fragmented
+ERR_INVALID_FORMAT (0B): Not a valid DOS executable (bad MZ header)
+ERR_INVALID_DRIVE  (0F): Drive letter not available
+ERR_DISK_FULL      (27): No space left on disk
 ```
