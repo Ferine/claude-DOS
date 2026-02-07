@@ -849,6 +849,9 @@ int21_3E:
     call    handle_to_sft
     jc      .close_bad
 
+    ; Save SFT index before it gets clobbered
+    push    ax                      ; AL = SFT index from handle_to_sft
+
     ; Mark handle entry as free using dynamic handle table
     push    es
     push    di
@@ -866,7 +869,8 @@ int21_3E:
     pop     es
 
     ; Dealloc SFT
-    xor     ah, ah                  ; AL already has SFT index
+    pop     ax                      ; Restore SFT index
+    xor     ah, ah
     call    sft_dealloc
 
 .close_device:

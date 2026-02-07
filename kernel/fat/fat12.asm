@@ -71,6 +71,7 @@ fat12_get_next_cluster:
     mov     bx, fat_buffer
     call    fat_read_sector
     pop     bx
+    jc      .boundary_err
     pop     ax
     mov     ah, [fat_buffer]    ; High byte from start of next sector
 
@@ -83,6 +84,15 @@ fat12_get_next_cluster:
     and     ax, 0x0FFF          ; Even: low 12 bits
 .done:
     clc
+    pop     es
+    pop     si
+    pop     cx
+    pop     bx
+    ret
+
+.boundary_err:
+    pop     ax                  ; Clean up saved low byte
+    stc
     pop     es
     pop     si
     pop     cx
@@ -176,6 +186,10 @@ fat12_set_cluster:
     pop     cx
     and     cx, 0x01FF          ; Offset within sector
 
+    ; Handle boundary case: if offset is 511, entry spans two sectors
+    cmp     cx, 511
+    je      .set_boundary
+
     mov     si, fat_buffer
     add     si, cx
     mov     ax, [si]            ; Read existing word
@@ -217,6 +231,115 @@ fat12_set_cluster:
     pop     dx
     pop     ax
 
+    pop     es
+    pop     si
+    pop     cx
+    pop     bx
+    ret
+
+; --- Boundary case: FAT12 entry spans two sectors (offset 511) ---
+; Low byte is at end of current sector, high byte at start of next sector
+.set_boundary:
+    ; Read low byte from current sector
+    mov     al, [fat_buffer + 511]
+
+    ; Read next FAT sector to get high byte
+    push    dx                  ; Save new value
+    push    ax                  ; Save low byte
+    mov     ax, [fat_buffer_sector]
+    inc     ax
+    push    ax                  ; Save next sector number
+    push    cs
+    pop     es
+    push    bx
+    mov     bx, fat_buffer
+    call    fat_read_sector
+    pop     bx
+    pop     cx                  ; CX = next sector number
+    pop     ax                  ; AL = low byte from first sector
+    jc      .set_boundary_err
+
+    mov     ah, [fat_buffer]    ; AH = high byte from next sector
+    pop     dx                  ; DX = new 12-bit value
+
+    ; Merge new value with existing nibbles
+    test    bx, 1               ; Odd cluster?
+    jz      .set_boundary_even
+    ; Odd: replace high 12 bits, keep low 4
+    and     ax, 0x000F
+    shl     dx, 4
+    or      ax, dx
+    jmp     .set_boundary_writeback
+.set_boundary_even:
+    ; Even: replace low 12 bits, keep high 4
+    and     ax, 0xF000
+    and     dx, 0x0FFF
+    or      ax, dx
+
+.set_boundary_writeback:
+    ; Write high byte to next sector (currently in fat_buffer)
+    mov     [fat_buffer], ah
+    push    ax                  ; Save low byte
+    push    dx
+    mov     [fat_buffer_sector], cx ; Next sector is now cached
+    mov     ax, cx
+    push    cs
+    pop     es
+    push    bx
+    mov     bx, fat_buffer
+    call    fat_write_sector
+    ; Write backup FAT copy of next sector
+    push    bx
+    mov     bx, [active_dpb]
+    add     ax, [bx + DPB_FAT_SIZE]
+    pop     bx
+    mov     bx, fat_buffer
+    call    fat_write_sector
+    pop     dx
+    pop     ax                  ; AL = low byte
+
+    ; Now re-read first sector to write low byte back
+    push    ax
+    mov     ax, cx
+    dec     ax                  ; First sector = next - 1
+    mov     [fat_buffer_sector], ax
+    push    cs
+    pop     es
+    push    bx
+    mov     bx, fat_buffer
+    call    fat_read_sector
+    pop     bx
+    pop     ax
+    jc      .set_boundary_done  ; If read fails, can't write back
+
+    mov     [fat_buffer + 511], al
+    push    ax
+    push    dx
+    mov     ax, [fat_buffer_sector]
+    push    cs
+    pop     es
+    push    bx
+    mov     bx, fat_buffer
+    call    fat_write_sector
+    ; Write backup FAT copy of first sector
+    push    bx
+    mov     bx, [active_dpb]
+    add     ax, [bx + DPB_FAT_SIZE]
+    pop     bx
+    mov     bx, fat_buffer
+    call    fat_write_sector
+    pop     dx
+    pop     ax
+
+.set_boundary_done:
+    pop     es
+    pop     si
+    pop     cx
+    pop     bx
+    ret
+
+.set_boundary_err:
+    pop     dx                  ; Clean up saved new value
     pop     es
     pop     si
     pop     cx
