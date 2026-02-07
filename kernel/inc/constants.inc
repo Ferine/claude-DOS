@@ -249,3 +249,10 @@ TIMER_CH2_MODE3     equ     0xB6        ; Channel 2, lobyte/hibyte, mode 3 (squa
 BEEP_FREQUENCY      equ     880         ; Default beep frequency (Hz) - A5 note
 BEEP_DIVISOR        equ     1193182 / BEEP_FREQUENCY  ; Timer divisor for beep
 BEL_CHAR            equ     0x07        ; Bell character (Ctrl+G)
+
+; DPMI Error Codes
+DPMI_ERR_UNSUPPORTED    equ     0x8001
+DPMI_ERR_NO_DESCRIPTORS equ     0x8011
+DPMI_ERR_NO_LINEAR_MEM  equ     0x8012
+DPMI_ERR_INVALID_VALUE  equ     0x8021
+DPMI_ERR_INVALID_LINEAR equ     0x8025

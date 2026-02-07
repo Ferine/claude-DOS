@@ -239,6 +239,28 @@ test_find_files() {
     log_info "FindFirst test: Screenshot captured"
 }
 
+test_dpmi() {
+    log_info "Testing INT 31h DPMI handler..."
+    start_qemu
+
+    {
+        sleep 0.3
+        send_keys "testdpmi"
+        sleep 3
+        capture_screen "dpmi_results"
+    } | run_monitor_script
+
+    stop_qemu
+
+    if [ -f "$RESULTS_DIR/dpmi_results.png" ]; then
+        log_info "DPMI test: Screenshot captured"
+        return 0
+    else
+        log_error "DPMI test: FAILED"
+        return 1
+    fi
+}
+
 # ===========================================================================
 # Main
 # ===========================================================================
@@ -269,9 +291,10 @@ else
         exec) test_exec ;;
         file) test_file_ops ;;
         find) test_find_files ;;
+        dpmi) test_dpmi ;;
         *)
             log_error "Unknown test: $1"
-            echo "Available tests: boot, dir, exec, file, find"
+            echo "Available tests: boot, dir, exec, file, find, dpmi"
             exit 1
             ;;
     esac
