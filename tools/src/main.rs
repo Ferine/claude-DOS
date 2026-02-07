@@ -138,8 +138,15 @@ fn run_hd_mode(args: &[&String]) {
             std::process::exit(1);
         });
 
-        let fat_name = to_fat_name(dos_path);
-        let c = img.add_file(&fat_name, &contents);
+        // Check if dos_path contains a directory component
+        let c = if dos_path.contains('/') {
+            let filename = dos_path.rsplit('/').next().unwrap();
+            let fat_name = to_fat_name(filename);
+            img.add_file_with_path(dos_path, &fat_name, &contents)
+        } else {
+            let fat_name = to_fat_name(dos_path);
+            img.add_file(&fat_name, &contents)
+        };
         eprintln!(
             "Added {} as {} (cluster {}, {} bytes)",
             file_path, dos_path, c, contents.len()

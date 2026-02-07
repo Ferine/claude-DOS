@@ -104,6 +104,44 @@ cmd_dir:
     je      .append_wildcard
     cmp     al, ':'
     je      .append_wildcard
+
+    ; No trailing \ or : — check if the spec is a bare directory name
+    ; Copy spec to dir_spec_buf (null-terminated) for attribute check
+    push    si
+    push    cx
+    mov     di, dir_spec_buf
+.copy_for_chk:
+    lodsb
+    cmp     al, 0
+    je      .chk_copied
+    cmp     al, ' '
+    je      .chk_copied
+    cmp     al, '/'
+    je      .chk_copied
+    stosb
+    jmp     .copy_for_chk
+.chk_copied:
+    mov     byte [di], 0        ; Null-terminate
+    ; Try INT 21h/4300h (Get File Attributes)
+    mov     dx, dir_spec_buf
+    mov     ax, 0x4300
+    int     0x21
+    jc      .not_a_dir          ; Not found or error — use spec as-is
+    test    cx, 0x10            ; ATTR_DIRECTORY?
+    jz      .not_a_dir
+    ; It's a directory — append \*.*
+    mov     byte [di], '\'
+    mov     byte [di+1], '*'
+    mov     byte [di+2], '.'
+    mov     byte [di+3], '*'
+    mov     byte [di+4], 0
+    pop     cx
+    pop     si
+    mov     dx, dir_spec_buf
+    jmp     .have_spec
+.not_a_dir:
+    pop     cx
+    pop     si
     jmp     .have_spec
 .append_wildcard:
     ; Copy path to dir_spec_buf and append *.*

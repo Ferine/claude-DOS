@@ -149,6 +149,25 @@ run-hd: floppy hd
 run-hd-serial: floppy hd
 	$(QEMU) -fda $(FLOPPY) -hda $(HD_IMG) -boot a -m 4 -nographic -serial mon:stdio $(AUDIO_OPTS)
 
+# --- Quake ---
+QUAKE_DIR := tests/Quake
+QUAKE_HD  := $(IMGDIR)/quake_hd.img
+
+quake-hd: $(QUAKE_HD)
+
+$(QUAKE_HD): $(MKFLOPPY) | $(IMGDIR)
+	$(MKFLOPPY) --hd $(QUAKE_HD) \
+		$(QUAKE_DIR)/quake.exe:QUAKE.EXE \
+		$(QUAKE_DIR)/cwsdpmi.exe:CWSDPMI.EXE \
+		$(QUAKE_DIR)/id1/pak0.pak:ID1/PAK0.PAK \
+		$(QUAKE_DIR)/id1/config.cfg:ID1/CONFIG.CFG
+
+run-quake: floppy quake-hd
+	$(QEMU) -fda $(FLOPPY) -hda $(QUAKE_HD) -boot a -m 16 -display cocoa $(AUDIO_OPTS)
+
+run-quake-serial: floppy quake-hd
+	$(QEMU) -fda $(FLOPPY) -hda $(QUAKE_HD) -boot a -m 16 -nographic -serial mon:stdio $(AUDIO_OPTS)
+
 debug: floppy
 	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -S -s -display cocoa $(AUDIO_OPTS) &
 	@echo "GDB: target remote :1234 / set architecture i8086 / break *0x7c00"
