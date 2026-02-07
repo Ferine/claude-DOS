@@ -14,7 +14,14 @@ int21_0E:
     mov     al, [save_dx]        ; DL
     cmp     al, LASTDRIVE
     jae     .bad_drive
+    cmp     al, [current_drive]
+    je      .bad_drive            ; Same drive, no switch needed
+    ; Save current drive's CWD to its CDS
+    call    cds_save_current
+    ; Switch to new drive
     mov     [current_drive], al
+    ; Load new drive's CWD from its CDS
+    call    cds_load_drive_current
 .bad_drive:
     mov     byte [save_ax], LASTDRIVE
     call    dos_clear_error

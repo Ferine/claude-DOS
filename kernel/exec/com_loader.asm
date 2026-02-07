@@ -42,12 +42,25 @@ load_com:
 
 .load_loop:
     push    ax
-    call    fat_cluster_to_lba
-    call    fat_read_sector         ; Read to ES:BX
-    pop     ax
-    jc      .read_error
+    call    fat_cluster_to_lba      ; AX = first LBA of cluster
+    jc      .read_error_pop
 
+    ; Read all sectors in this cluster
+    push    cx
+    push    bx                      ; Save buffer pointer
+    mov     bx, [active_dpb]
+    xor     ch, ch
+    mov     cl, [bx + DPB_SEC_PER_CLUS]
+    inc     cx                      ; CX = actual sectors per cluster
+    pop     bx                      ; Restore buffer pointer
+.load_sector:
+    call    fat_read_sector         ; Read to ES:BX
+    jc      .read_error_pop3
     add     bx, 512
+    inc     ax                      ; Next sector
+    loop    .load_sector
+    pop     cx
+    pop     ax                      ; Restore cluster number
 
     ; Get next cluster
     call    fat_get_next_cluster
@@ -85,6 +98,10 @@ load_com:
     pop     bx
     ret
 
+.read_error_pop3:
+    pop     cx
+.read_error_pop:
+    pop     ax
 .read_error:
     mov     ax, ERR_READ_FAULT
     stc

@@ -471,6 +471,7 @@ cache_invalidate_drive:
 ; ---------------------------------------------------------------------------
 fat_cluster_to_lba:
     push    bx
+    push    cx
     ; Validate cluster number
     cmp     ax, 2                   ; Clusters 0 and 1 are reserved
     jb      .invalid
@@ -478,9 +479,12 @@ fat_cluster_to_lba:
     cmp     ax, [bx + DPB_MAX_CLUSTER] ; Check against maximum
     jae     .check_special
 
-    ; Valid data cluster - convert to LBA
+    ; Valid data cluster - convert to first LBA of cluster
     sub     ax, 2
+    mov     cl, [bx + DPB_CLUS_SHIFT]  ; Log2(sectors per cluster)
+    shl     ax, cl                      ; Multiply by sectors per cluster
     add     ax, [bx + DPB_DATA_START]
+    pop     cx
     pop     bx
     clc
     ret
@@ -497,24 +501,43 @@ fat_cluster_to_lba:
 
 .invalid:
 .bad_cluster:
+    pop     cx
     pop     bx
     stc                             ; Set carry flag for invalid cluster
     ret
 
 .end_of_chain:
     ; End of chain is not really invalid, but can't be converted to LBA
+    pop     cx
     pop     bx
     stc
     ret
 
 ; ---------------------------------------------------------------------------
-; fat_read_cluster - Read one cluster into buffer
+; fat_read_cluster - Read all sectors of a cluster into buffer
 ; Input: AX = cluster number, ES:BX = buffer
+; Note: Buffer must be large enough for sec_per_clus * 512 bytes
 ; ---------------------------------------------------------------------------
 fat_read_cluster:
     push    ax
-    call    fat_cluster_to_lba
+    push    cx
+    call    fat_cluster_to_lba      ; AX = first LBA of cluster
+    jc      .rc_done
+    ; Get sectors per cluster
+    push    bx
+    mov     bx, [active_dpb]
+    xor     ch, ch
+    mov     cl, [bx + DPB_SEC_PER_CLUS]
+    inc     cx                      ; Actual sector count
+    pop     bx
+.rc_loop:
     call    fat_read_sector
+    jc      .rc_done
+    inc     ax                      ; Next sector
+    add     bx, 512                 ; Advance buffer pointer
+    loop    .rc_loop
+.rc_done:
+    pop     cx
     pop     ax
     ret
 
@@ -743,13 +766,28 @@ fat_find_in_directory:
     ; Subdirectory: search cluster chain
     mov     dx, ax              ; DX = current cluster
 .next_cluster:
-    ; Read this cluster's sector
-    push    dx
+    ; Compute first LBA of this cluster
     mov     ax, dx
     call    fat_cluster_to_lba
+    mov     [.subdir_cur_sector], ax
+    jc      .not_found
+    ; Get sectors per cluster
+    push    bx
+    mov     bx, [active_dpb]
+    xor     ah, ah
+    mov     al, [bx + DPB_SEC_PER_CLUS]
+    inc     ax
+    mov     [.subdir_secs_left], ax
+    pop     bx
+
+.next_sector_in_cluster:
+    cmp     word [.subdir_secs_left], 0
+    jbe     .advance_cluster
+
+    ; Read current sector
+    mov     ax, [.subdir_cur_sector]
     mov     bx, disk_buffer
     call    fat_read_sector
-    pop     dx
     jc      .not_found
 
     ; Search 16 entries in this sector
@@ -778,17 +816,8 @@ fat_find_in_directory:
     add     di, 32
     loop    .check_subdir_entry
 
-    ; Move to next cluster in chain
-    push    si
-    mov     ax, dx
-    call    fat_get_next_cluster
-    mov     dx, ax
-    pop     si
-    cmp     dx, [fat_eoc_min]
-    jb      .next_cluster
-
-    ; End of chain, not found
-    jmp     .not_found
+    ; All entries in this sector checked - try next sector in cluster
+    jmp     .try_next_sector
 
 .next_subdir_entry_pop:
     pop     di
@@ -796,7 +825,15 @@ fat_find_in_directory:
     pop     cx
     add     di, 32
     loop    .check_subdir_entry
-    ; Continue to next cluster
+    ; Fall through to try next sector in cluster
+
+.try_next_sector:
+    dec     word [.subdir_secs_left]
+    inc     word [.subdir_cur_sector]
+    jmp     .next_sector_in_cluster
+
+.advance_cluster:
+    ; Move to next cluster in chain
     push    si
     mov     ax, dx
     call    fat_get_next_cluster
@@ -813,9 +850,8 @@ fat_find_in_directory:
     jmp     .not_found
 
 .found_subdir:
-    ; DI = entry pointer, need to get sector number
-    mov     ax, dx
-    call    fat_cluster_to_lba  ; AX = sector number
+    ; DI = entry pointer, return actual sector number
+    mov     ax, [.subdir_cur_sector]
     clc
     pop     es
     pop     dx
@@ -906,6 +942,10 @@ fat_find_in_directory:
     pop     cx
     pop     bx
     ret
+
+; Static variables for fat_find_in_directory (not reentrant)
+.subdir_cur_sector  dw  0
+.subdir_secs_left   dw  0
 
 ; ---------------------------------------------------------------------------
 ; parse_path_component - Extract next path component from ASCIIZ path
@@ -1078,6 +1118,7 @@ resolve_path:
     sub     al, 0x20
 .drive_upper:
     sub     al, 'A'             ; AL = drive number (0=A:, 2=C:)
+    mov     [.resolve_drive], al
     call    fat_set_active_drive
     add     si, 2
     jmp     .drive_set
@@ -1085,6 +1126,7 @@ resolve_path:
 .no_drive:
     ; No drive letter - use current_drive
     mov     al, [current_drive]
+    mov     [.resolve_drive], al
     call    fat_set_active_drive
 
 .drive_set:
@@ -1101,8 +1143,26 @@ resolve_path:
     jmp     .start_resolve_abs
 
 .start_resolve:
-    ; Relative path - start from current directory
+    ; Relative path - start from correct drive's current directory
+    mov     al, [.resolve_drive]
+    cmp     al, [current_drive]
+    jne     .rp_other_drive_cwd
+    ; Same as current drive - use globals
     mov     ax, [current_dir_cluster]
+    jmp     .start_resolve_abs
+
+.rp_other_drive_cwd:
+    ; Different drive - look up CDS for that drive's CWD
+    push    di
+    call    cds_get_entry
+    jc      .rp_cds_fallback
+    mov     ax, [di + CDS.start_cluster]
+    pop     di
+    jmp     .start_resolve_abs
+
+.rp_cds_fallback:
+    pop     di
+    xor     ax, ax                  ; Default to root if CDS invalid
 
 .start_resolve_abs:
     ; AX = current directory cluster (0 = root)
@@ -1207,6 +1267,8 @@ resolve_path:
 
 ; FCB-format name for ".." entry
 .dotdot_name    db  '..         '
+; Drive number for current resolve_path call
+.resolve_drive  db  0
 
 .last_component:
     ; Skip leading slash if present

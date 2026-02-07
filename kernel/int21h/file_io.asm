@@ -333,14 +333,26 @@ int21_3C_common:
 .cr_subdir_loop:
     mov     ax, dx
     call    fat_cluster_to_lba
-    push    dx                      ; Save current cluster
-    push    ax                      ; Save sector number
+    mov     [.cr_sub_sector], ax
+    jc      .cr_read_error_nostack
+    ; Get sectors per cluster
+    push    bx
+    mov     bx, [active_dpb]
+    xor     ah, ah
+    mov     al, [bx + DPB_SEC_PER_CLUS]
+    inc     ax
+    mov     [.cr_sub_secs], ax
+    pop     bx
+
+.cr_sub_next_sec:
+    cmp     word [.cr_sub_secs], 0
+    jbe     .cr_subdir_next_cluster
+
+    mov     ax, [.cr_sub_sector]
     push    cs
     pop     es
     mov     bx, disk_buffer
     call    fat_read_sector
-    pop     ax                      ; Restore sector number
-    pop     dx                      ; Restore current cluster
     jc      .cr_read_error_nostack
 
     ; Search 16 entries per sector
@@ -348,7 +360,7 @@ int21_3C_common:
     xor     cx, cx
 .cr_subdir_entry:
     cmp     cx, 16
-    jae     .cr_subdir_next_cluster
+    jae     .cr_sub_try_next
     cmp     byte [di], 0x00         ; Empty
     je      .cr_found_subdir_slot
     cmp     byte [di], 0xE5         ; Deleted
@@ -356,6 +368,11 @@ int21_3C_common:
     add     di, 32
     inc     cx
     jmp     .cr_subdir_entry
+
+.cr_sub_try_next:
+    dec     word [.cr_sub_secs]
+    inc     word [.cr_sub_sector]
+    jmp     .cr_sub_next_sec
 
 .cr_subdir_next_cluster:
     ; Move to next cluster in chain
@@ -367,9 +384,8 @@ int21_3C_common:
     jmp     .cr_dir_full            ; Directory full, no empty slots
 
 .cr_found_subdir_slot:
-    ; Found empty slot: DX = cluster, CX = entry index, DI = entry pointer
-    mov     ax, dx
-    call    fat_cluster_to_lba
+    ; Found empty slot: CX = entry index, DI = entry pointer
+    mov     ax, [.cr_sub_sector]    ; Actual sector being scanned
     mov     [search_dir_sector], ax
     mov     [search_dir_index], cx
 
@@ -615,6 +631,10 @@ int21_3C_common:
     pop     es
     mov     ax, ERR_PATH_NOT_FOUND
     jmp     dos_set_error
+
+; Local variables for create subdir scanning
+.cr_sub_sector  dw  0
+.cr_sub_secs    dw  0
 
 ; AH=3Dh - Open file
 ; Input: DS:DX = ASCIIZ filename (caller's), AL = access mode
@@ -1011,7 +1031,7 @@ int21_3F:
     mov     ax, [cs:bp + SFT_ENTRY.file_pos]
     and     ax, 0x01FF              ; offset_in_sector
 
-    ; Read current cluster's sector into disk_buffer
+    ; Read correct sector within current cluster into disk_buffer
     push    cx
     push    dx
     push    es
@@ -1021,7 +1041,16 @@ int21_3F:
     push    cs
     pop     es
     mov     bx, disk_buffer
-    call    fat_cluster_to_lba
+    call    fat_cluster_to_lba      ; AX = first LBA of cluster
+    ; Add sector offset within cluster based on file_pos
+    push    bx
+    mov     bx, [active_dpb]
+    mov     cx, [cs:bp + SFT_ENTRY.file_pos]
+    shr     cx, 9                   ; file_pos / 512 = sector offset
+    and     cl, [bx + DPB_SEC_PER_CLUS]  ; Mask = sec_per_clus - 1
+    xor     ch, ch
+    add     ax, cx                  ; AX = correct sector within cluster
+    pop     bx
     call    fat_read_sector
 
     pop     si
@@ -1069,13 +1098,20 @@ int21_3F:
     add     dx, bx                  ; Total bytes read
     sub     cx, bx                  ; Bytes remaining
 
-    ; Check if we crossed a sector/cluster boundary
-    ; (1 sector per cluster on 1.44MB floppy)
+    ; Check if we crossed a sector boundary
     mov     ax, [cs:bp + SFT_ENTRY.file_pos]
     test    ax, 0x01FF              ; If low 9 bits are 0, we crossed a sector
     jnz     .read_loop
 
-    ; Crossed sector boundary - advance to next cluster
+    ; Crossed sector boundary - check if also crossed cluster boundary
+    shr     ax, 9                   ; file_pos / 512
+    push    bx
+    mov     bx, [active_dpb]
+    test    al, [bx + DPB_SEC_PER_CLUS]  ; sec_per_clus - 1 is bitmask
+    pop     bx
+    jnz     .read_loop              ; Still in same cluster, next sector
+
+    ; Crossed cluster boundary - advance to next cluster
     push    cx
     push    dx
     mov     ax, [cs:bp + SFT_ENTRY.cur_cluster]
@@ -1290,7 +1326,7 @@ int21_40:
 .write_have_cluster:
     pop     ax                      ; Restore offset_in_sector
 
-    ; Read current sector into disk_buffer (for partial writes)
+    ; Read correct sector within cluster into disk_buffer (for partial writes)
     push    cx
     push    dx
     push    ds
@@ -1303,7 +1339,16 @@ int21_40:
     push    cs
     pop     es
     mov     bx, disk_buffer
-    call    fat_cluster_to_lba
+    call    fat_cluster_to_lba      ; AX = first LBA of cluster
+    ; Add sector offset within cluster based on file_pos
+    push    bx
+    mov     bx, [active_dpb]
+    mov     cx, [cs:bp + SFT_ENTRY.file_pos]
+    shr     cx, 9
+    and     cl, [bx + DPB_SEC_PER_CLUS]
+    xor     ch, ch
+    add     ax, cx
+    pop     bx
     push    ax                      ; Save LBA for write-back
     call    fat_read_sector
     ; Ignore read error for new/empty sectors
@@ -1398,7 +1443,15 @@ int21_40:
     test    ax, 0x01FF              ; If low 9 bits are 0, crossed sector
     jnz     .write_loop
 
-    ; Crossed sector - advance to next cluster
+    ; Crossed sector boundary - check if also crossed cluster boundary
+    shr     ax, 9                   ; file_pos / 512
+    push    bx
+    mov     bx, [active_dpb]
+    test    al, [bx + DPB_SEC_PER_CLUS]  ; sec_per_clus - 1 is bitmask
+    pop     bx
+    jnz     .write_loop             ; Still in same cluster, next sector
+
+    ; Crossed cluster boundary - advance to next cluster
     push    cx
     push    dx
     push    ds
@@ -2369,21 +2422,32 @@ int21_56:
 .ren_target_sub_loop:
     mov     ax, dx
     call    fat_cluster_to_lba
-    push    dx
-    push    ax
+    mov     [.ren_sub_sector], ax
+    jc      .ren_read_error
+    push    bx
+    mov     bx, [active_dpb]
+    xor     ah, ah
+    mov     al, [bx + DPB_SEC_PER_CLUS]
+    inc     ax
+    mov     [.ren_sub_secs], ax
+    pop     bx
+
+.ren_sub_next_sec:
+    cmp     word [.ren_sub_secs], 0
+    jbe     .ren_target_sub_next
+
+    mov     ax, [.ren_sub_sector]
     push    cs
     pop     es
     mov     bx, disk_buffer
     call    fat_read_sector
-    pop     ax
-    pop     dx
     jc      .ren_read_error
 
     mov     di, disk_buffer
     xor     cx, cx
 .ren_target_sub_entry:
     cmp     cx, 16
-    jae     .ren_target_sub_next
+    jae     .ren_sub_try_next
     cmp     byte [di], 0x00
     je      .ren_target_sub_found
     cmp     byte [di], 0xE5
@@ -2391,6 +2455,11 @@ int21_56:
     add     di, 32
     inc     cx
     jmp     .ren_target_sub_entry
+
+.ren_sub_try_next:
+    dec     word [.ren_sub_secs]
+    inc     word [.ren_sub_sector]
+    jmp     .ren_sub_next_sec
 
 .ren_target_sub_next:
     mov     ax, dx
@@ -2401,9 +2470,8 @@ int21_56:
     jmp     .ren_dir_full
 
 .ren_target_sub_found:
-    ; DI = empty slot in disk_buffer, DX = cluster
-    mov     ax, dx
-    call    fat_cluster_to_lba
+    ; DI = empty slot in disk_buffer
+    mov     ax, [.ren_sub_sector]
     mov     [.ren_target_sector], ax
 
 .ren_do_move:
@@ -2545,6 +2613,8 @@ int21_56:
 .ren_src_drive      db  0
 .ren_new_name       times 11 db 0
 .ren_saved_entry    times 32 db 0
+.ren_sub_sector     dw  0
+.ren_sub_secs       dw  0
 
 ; AH=57h - Get/Set file date/time
 ; Input: AL = 0 (get) or 1 (set)
@@ -3138,21 +3208,32 @@ int21_6C:
 .ext_subdir_loop:
     mov     ax, dx
     call    fat_cluster_to_lba
-    push    dx
-    push    ax
+    mov     [.ext_sub_sector], ax
+    jc      .ext_read_error
+    push    bx
+    mov     bx, [active_dpb]
+    xor     ah, ah
+    mov     al, [bx + DPB_SEC_PER_CLUS]
+    inc     ax
+    mov     [.ext_sub_secs], ax
+    pop     bx
+
+.ext_sub_next_sec:
+    cmp     word [.ext_sub_secs], 0
+    jbe     .ext_subdir_next
+
+    mov     ax, [.ext_sub_sector]
     push    cs
     pop     es
     mov     bx, disk_buffer
     call    fat_read_sector
-    pop     ax
-    pop     dx
     jc      .ext_read_error
 
     mov     di, disk_buffer
     xor     cx, cx
 .ext_subdir_entry:
     cmp     cx, 16
-    jae     .ext_subdir_next
+    jae     .ext_sub_try_next
     cmp     byte [di], 0x00
     je      .ext_found_subdir_slot
     cmp     byte [di], 0xE5
@@ -3160,6 +3241,11 @@ int21_6C:
     add     di, 32
     inc     cx
     jmp     .ext_subdir_entry
+
+.ext_sub_try_next:
+    dec     word [.ext_sub_secs]
+    inc     word [.ext_sub_sector]
+    jmp     .ext_sub_next_sec
 
 .ext_subdir_next:
     mov     ax, dx
@@ -3170,8 +3256,7 @@ int21_6C:
     jmp     .ext_dir_full
 
 .ext_found_subdir_slot:
-    mov     ax, dx
-    call    fat_cluster_to_lba
+    mov     ax, [.ext_sub_sector]
     mov     [search_dir_sector], ax
     mov     [search_dir_index], cx
 
@@ -3370,6 +3455,8 @@ int21_6C:
 ; Local data for extended open
 .ext_action     db  0
 .ext_dir_cluster dw 0
+.ext_sub_sector dw  0
+.ext_sub_secs   dw  0
 
 ; ---------------------------------------------------------------------------
 ; get_dos_datetime - Read RTC and return DOS-format packed time/date

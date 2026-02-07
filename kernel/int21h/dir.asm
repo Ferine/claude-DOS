@@ -2,6 +2,104 @@
 ; claudeDOS INT 21h Directory Functions - Stubs (Phase 3/7)
 ; ===========================================================================
 
+; ---------------------------------------------------------------------------
+; CDS Helper Functions - Per-drive current directory management
+; ---------------------------------------------------------------------------
+
+; cds_get_entry - Get CDS entry pointer for a drive
+; Input: AL = drive number (0=A:, 2=C:, etc.)
+; Output: DI = pointer to CDS entry, CF=0 valid / CF=1 invalid
+cds_get_entry:
+    push    ax
+    push    dx
+    cmp     al, LASTDRIVE
+    jae     .cds_invalid
+    xor     ah, ah
+    mov     dx, CDS_SIZE
+    mul     dx                      ; AX = drive * CDS_SIZE
+    mov     di, cds_table
+    add     di, ax
+    test    word [di + CDS.flags], CDS_VALID
+    jz      .cds_invalid
+    pop     dx
+    pop     ax
+    clc
+    ret
+.cds_invalid:
+    pop     dx
+    pop     ax
+    stc
+    ret
+
+; cds_save_current - Save current_dir_cluster/path to current drive's CDS
+cds_save_current:
+    push    ax
+    push    cx
+    push    si
+    push    di
+    mov     al, [current_drive]
+    call    cds_get_entry
+    jc      .csave_done
+    ; Save start_cluster
+    mov     ax, [current_dir_cluster]
+    mov     [di + CDS.start_cluster], ax
+    ; Update CDS path after "X:\" (offset 3)
+    push    di
+    add     di, 3
+    mov     si, current_dir_path
+    mov     cx, 63
+.csave_path:
+    lodsb
+    mov     [di], al
+    inc     di
+    test    al, al
+    jz      .csave_path_done
+    loop    .csave_path
+    mov     byte [di], 0
+.csave_path_done:
+    pop     di
+.csave_done:
+    pop     di
+    pop     si
+    pop     cx
+    pop     ax
+    ret
+
+; cds_load_drive_current - Load CWD from current drive's CDS into globals
+cds_load_drive_current:
+    push    ax
+    push    cx
+    push    si
+    push    di
+    mov     al, [current_drive]
+    call    cds_get_entry
+    jc      .cload_root
+    ; Load start_cluster
+    mov     ax, [di + CDS.start_cluster]
+    mov     [current_dir_cluster], ax
+    ; Load path: CDS.path[3:] -> current_dir_path
+    mov     si, di
+    add     si, 3
+    mov     di, current_dir_path
+    mov     cx, 63
+.cload_path:
+    lodsb
+    stosb
+    test    al, al
+    jz      .cload_done
+    loop    .cload_path
+    mov     byte [di], 0
+    jmp     .cload_done
+.cload_root:
+    mov     word [current_dir_cluster], 0
+    mov     byte [current_dir_path], 0
+.cload_done:
+    pop     di
+    pop     si
+    pop     cx
+    pop     ax
+    ret
+
 ; AH=39h - Create directory
 ; Input: DS:DX = ASCIIZ directory name
 int21_39:
@@ -93,21 +191,32 @@ int21_39:
 .mkdir_subdir_loop:
     mov     ax, dx
     call    fat_cluster_to_lba
-    push    dx
-    push    ax
+    mov     [.mkdir_sub_sector], ax
+    jc      .mkdir_read_error
+    push    bx
+    mov     bx, [active_dpb]
+    xor     ah, ah
+    mov     al, [bx + DPB_SEC_PER_CLUS]
+    inc     ax
+    mov     [.mkdir_sub_secs], ax
+    pop     bx
+
+.mkdir_sub_next_sec:
+    cmp     word [.mkdir_sub_secs], 0
+    jbe     .mkdir_next_subdir_cluster
+
+    mov     ax, [.mkdir_sub_sector]
     push    cs
     pop     es
     mov     bx, disk_buffer
     call    fat_read_sector
-    pop     ax
-    pop     dx
     jc      .mkdir_read_error
 
     mov     di, disk_buffer
     xor     cx, cx
 .mkdir_subdir_entry:
     cmp     cx, 16
-    jae     .mkdir_next_subdir_cluster
+    jae     .mkdir_sub_try_next
     cmp     byte [di], 0x00
     je      .mkdir_found_subdir_slot
     cmp     byte [di], 0xE5
@@ -115,6 +224,11 @@ int21_39:
     add     di, 32
     inc     cx
     jmp     .mkdir_subdir_entry
+
+.mkdir_sub_try_next:
+    dec     word [.mkdir_sub_secs]
+    inc     word [.mkdir_sub_sector]
+    jmp     .mkdir_sub_next_sec
 
 .mkdir_next_subdir_cluster:
     mov     ax, dx
@@ -125,8 +239,7 @@ int21_39:
     jmp     .mkdir_dir_full
 
 .mkdir_found_subdir_slot:
-    mov     ax, dx
-    call    fat_cluster_to_lba
+    mov     ax, [.mkdir_sub_sector]
     mov     [.mkdir_dir_sector], ax
     mov     [.mkdir_dir_index], cx
 
@@ -175,7 +288,20 @@ int21_39:
     jc      .mkdir_write_error
 
     ; Initialize the new directory's cluster with . and .. entries
-    ; First, zero out the cluster
+    ; Get first LBA and sector count for the new cluster
+    mov     ax, [.mkdir_new_cluster]
+    call    fat_cluster_to_lba
+    jc      .mkdir_write_error
+    mov     [.mkdir_sub_sector], ax
+    push    bx
+    mov     bx, [active_dpb]
+    xor     ah, ah
+    mov     al, [bx + DPB_SEC_PER_CLUS]
+    inc     ax
+    mov     [.mkdir_sub_secs], ax
+    pop     bx
+
+    ; Zero out the buffer
     push    cs
     pop     es
     mov     di, disk_buffer
@@ -216,14 +342,33 @@ int21_39:
     mov     ax, [.mkdir_parent_cluster]
     mov     [di + 26], ax
 
-    ; Write the new directory's cluster
-    mov     ax, [.mkdir_new_cluster]
-    call    fat_cluster_to_lba
+    ; Write first sector (with . and .. entries)
+    push    cs
+    pop     es
+    mov     bx, disk_buffer
+    mov     ax, [.mkdir_sub_sector]
+    call    fat_write_sector
+    jc      .mkdir_write_error
+
+    ; Write remaining sectors as zeroed
+    dec     word [.mkdir_sub_secs]
+    jz      .mkdir_init_done
+    ; Re-zero disk_buffer (. and .. entries only in first sector)
+    mov     di, disk_buffer
+    mov     cx, 256
+    xor     ax, ax
+    rep     stosw
+.mkdir_zero_loop:
+    inc     word [.mkdir_sub_sector]
+    mov     ax, [.mkdir_sub_sector]
     push    cs
     pop     es
     mov     bx, disk_buffer
     call    fat_write_sector
     jc      .mkdir_write_error
+    dec     word [.mkdir_sub_secs]
+    jnz     .mkdir_zero_loop
+.mkdir_init_done:
 
     ; Success
     pop     dx
@@ -294,6 +439,8 @@ int21_39:
 .mkdir_new_cluster      dw  0
 .mkdir_dir_sector       dw  0
 .mkdir_dir_index        dw  0
+.mkdir_sub_sector       dw  0
+.mkdir_sub_secs         dw  0
 
 ; AH=3Ah - Remove directory
 ; Input: DS:DX = ASCIIZ directory name
@@ -363,75 +510,64 @@ int21_3A:
     cmp     ax, 2
     jb      .rmdir_access_denied    ; Invalid cluster
 
+    ; Walk the directory's cluster chain checking for non-empty entries
+    mov     byte [.rmdir_first_sec], 1  ; Flag: first sector has . and ..
+
+.rmdir_check_cluster:
+    mov     ax, [.rmdir_dir_cluster]
     call    fat_cluster_to_lba
     jc      .rmdir_access_denied
+    mov     [.rmdir_cur_sector], ax
+    push    bx
+    mov     bx, [active_dpb]
+    xor     ah, ah
+    mov     al, [bx + DPB_SEC_PER_CLUS]
+    inc     ax
+    mov     [.rmdir_secs_left], ax
+    pop     bx
+
+.rmdir_check_next_sec:
+    cmp     word [.rmdir_secs_left], 0
+    jbe     .rmdir_next_dir_cluster
+
+    mov     ax, [.rmdir_cur_sector]
     push    cs
     pop     es
     mov     bx, disk_buffer
     call    fat_read_sector
     jc      .rmdir_read_error
 
-    ; Check entries - first two should be . and .., rest should be empty/deleted
     mov     di, disk_buffer
     mov     cx, 16                  ; Entries per sector
 
-.rmdir_check_entry:
-    ; First entry should be "."
-    cmp     cx, 16
-    jne     .rmdir_check_dotdot
-    cmp     byte [di], '.'
-    jne     .rmdir_not_empty
-    jmp     .rmdir_next_check
-
-.rmdir_check_dotdot:
-    ; Second entry should be ".."
-    cmp     cx, 15
+    ; Skip . and .. on first sector
+    cmp     byte [.rmdir_first_sec], 1
     jne     .rmdir_check_empty
-    cmp     byte [di], '.'
-    jne     .rmdir_not_empty
-    cmp     byte [di + 1], '.'
-    jne     .rmdir_not_empty
-    jmp     .rmdir_next_check
+    mov     byte [.rmdir_first_sec], 0
+    ; Skip first 2 entries (. and ..)
+    add     di, 64
+    sub     cx, 2
 
 .rmdir_check_empty:
-    ; All other entries must be empty (0x00) or deleted (0xE5)
     cmp     byte [di], 0x00
     je      .rmdir_is_empty         ; End of directory - it's empty
     cmp     byte [di], 0xE5
     jne     .rmdir_not_empty
-
-.rmdir_next_check:
     add     di, 32
-    dec     cx
-    jnz     .rmdir_check_entry
+    loop    .rmdir_check_empty
 
-    ; Need to check next cluster if exists
+    ; All entries in this sector are deleted - try next sector
+    dec     word [.rmdir_secs_left]
+    inc     word [.rmdir_cur_sector]
+    jmp     .rmdir_check_next_sec
+
+.rmdir_next_dir_cluster:
     mov     ax, [.rmdir_dir_cluster]
     call    fat_get_next_cluster
     cmp     ax, [fat_eoc_min]
     jae     .rmdir_is_empty         ; No more clusters - directory is empty
-
-    ; More clusters to check - they should all be empty
     mov     [.rmdir_dir_cluster], ax
-    call    fat_cluster_to_lba
-    jc      .rmdir_is_empty         ; Error reading - assume empty for now
-    push    cs
-    pop     es
-    mov     bx, disk_buffer
-    call    fat_read_sector
-    jc      .rmdir_read_error
-
-    mov     di, disk_buffer
-    mov     cx, 16
-.rmdir_check_more:
-    cmp     byte [di], 0x00
-    je      .rmdir_is_empty
-    cmp     byte [di], 0xE5
-    jne     .rmdir_not_empty
-    add     di, 32
-    loop    .rmdir_check_more
-    ; If we get here, all entries were deleted - it's effectively empty
-    ; (In a full implementation, we'd check all clusters in chain)
+    jmp     .rmdir_check_cluster
 
 .rmdir_is_empty:
     ; Directory is empty - proceed with removal
@@ -540,6 +676,9 @@ int21_3A:
 .rmdir_dir_cluster      dw  0
 .rmdir_entry_sector     dw  0
 .rmdir_entry_index      dw  0
+.rmdir_cur_sector       dw  0
+.rmdir_secs_left        dw  0
+.rmdir_first_sec        db  0
 
 ; AH=3Bh - Change directory
 ; Input: DS:DX = ASCIIZ path
@@ -567,24 +706,37 @@ int21_3B:
 .cd_copied:
     pop     ds                      ; DS = kernel seg
 
-    ; Check for root directory special case
+    ; Determine target drive
     mov     si, path_buffer
-    ; Skip drive letter if present
     cmp     byte [si + 1], ':'
-    jne     .cd_no_drive
+    jne     .cd_use_cur_drive
+    mov     al, [si]
+    cmp     al, 'a'
+    jb      .cd_drv_upper
+    cmp     al, 'z'
+    ja      .cd_drv_upper
+    sub     al, 0x20
+.cd_drv_upper:
+    sub     al, 'A'
+    mov     [.cd_target_drive], al
     add     si, 2
-.cd_no_drive:
+    jmp     .cd_check_root
+
+.cd_use_cur_drive:
+    mov     al, [current_drive]
+    mov     [.cd_target_drive], al
+
+.cd_check_root:
     ; Check if it's just "\" (root)
     cmp     byte [si], '\'
     jne     .cd_not_root
     cmp     byte [si + 1], 0
     jne     .cd_not_root
     ; Change to root directory
-    mov     word [current_dir_cluster], 0
-    mov     byte [current_dir_path], 0
-    jmp     .cd_success
-.cd_not_root:
+    xor     ax, ax                  ; Cluster 0 = root
+    jmp     .cd_update_state
 
+.cd_not_root:
     ; Resolve the path to find the target directory
     mov     si, path_buffer
     call    resolve_path
@@ -606,21 +758,26 @@ int21_3B:
     ; Get the directory's cluster
     mov     ax, [di + 26]           ; First cluster
 
-    ; Update current directory state
+.cd_update_state:
+    ; AX = target directory cluster
+    ; Check if updating current drive or a different drive
+    mov     bl, [.cd_target_drive]
+    cmp     bl, [current_drive]
+    jne     .cd_other_drive
+
+    ; Same drive - update globals
     mov     [current_dir_cluster], ax
 
-    ; Update current_dir_path
-    ; For simplicity, just copy the path (stripping drive letter)
+    ; Update current_dir_path (strip drive letter and leading \)
     mov     si, path_buffer
     cmp     byte [si + 1], ':'
-    jne     .cd_copy_path
+    jne     .cd_strip
     add     si, 2
-.cd_copy_path:
-    ; Skip leading backslash
+.cd_strip:
     cmp     byte [si], '\'
-    jne     .cd_copy_path2
+    jne     .cd_copy_path
     inc     si
-.cd_copy_path2:
+.cd_copy_path:
     mov     di, current_dir_path
     mov     cx, 63
 .cd_path_loop:
@@ -631,6 +788,40 @@ int21_3B:
     loop    .cd_path_loop
     mov     byte [di], 0
 .cd_path_done:
+    ; Also sync to CDS
+    call    cds_save_current
+    jmp     .cd_success
+
+.cd_other_drive:
+    ; Different drive - update only that drive's CDS
+    mov     al, bl
+    call    cds_get_entry
+    jc      .cd_not_found
+    ; DI = CDS entry pointer
+    mov     [di + CDS.start_cluster], ax
+    ; Update CDS path after "X:\" (offset 3)
+    push    di
+    add     di, 3
+    mov     si, path_buffer
+    cmp     byte [si + 1], ':'
+    jne     .cd_o_strip
+    add     si, 2
+.cd_o_strip:
+    cmp     byte [si], '\'
+    jne     .cd_o_copy
+    inc     si
+.cd_o_copy:
+    mov     cx, 63
+.cd_o_loop:
+    lodsb
+    mov     [di], al
+    inc     di
+    test    al, al
+    jz      .cd_o_done
+    loop    .cd_o_loop
+    mov     byte [di], 0
+.cd_o_done:
+    pop     di
 
 .cd_success:
     pop     bx
@@ -648,6 +839,9 @@ int21_3B:
     mov     ax, ERR_PATH_NOT_FOUND
     jmp     dos_set_error
 
+; Local variable
+.cd_target_drive    db  0
+
 ; AH=47h - Get current directory
 ; Input: DL = drive (0=default), DS:SI = 64-byte buffer
 ; Output: DS:SI = ASCIIZ path (without leading backslash)
@@ -656,25 +850,66 @@ int21_47:
     push    di
     push    si
 
-    ; Copy current_dir_path to caller's buffer
+    ; Determine target drive
+    mov     al, [save_dx]           ; DL
+    test    al, al
+    jz      .getcwd_use_default
+    dec     al                      ; Convert 1-based to 0-based
+    jmp     .getcwd_have_drive
+.getcwd_use_default:
+    mov     al, [current_drive]
+.getcwd_have_drive:
+    ; AL = drive number (0-based)
+    cmp     al, [current_drive]
+    jne     .getcwd_from_cds
+
+    ; Current drive - copy from globals
     mov     es, [save_ds]
     mov     di, [save_si]
     mov     si, current_dir_path
     mov     cx, 63
 .getcwd_loop:
     lodsb
-    stosb
+    mov     [es:di], al
+    inc     di
     test    al, al
-    jz      .getcwd_done
+    jz      .getcwd_ok
     loop    .getcwd_loop
     mov     byte [es:di], 0
-.getcwd_done:
+    jmp     .getcwd_ok
 
+.getcwd_from_cds:
+    ; Different drive - read from CDS
+    call    cds_get_entry
+    jc      .getcwd_invalid
+    ; DI = CDS entry pointer; read path after "X:\" (offset 3)
+    mov     si, di
+    add     si, 3
+    mov     es, [save_ds]
+    mov     di, [save_si]
+    mov     cx, 63
+.getcwd_cds_loop:
+    lodsb
+    mov     [es:di], al
+    inc     di
+    test    al, al
+    jz      .getcwd_ok
+    loop    .getcwd_cds_loop
+    mov     byte [es:di], 0
+
+.getcwd_ok:
     pop     si
     pop     di
     pop     es
     call    dos_clear_error
     ret
+
+.getcwd_invalid:
+    pop     si
+    pop     di
+    pop     es
+    mov     ax, ERR_INVALID_DRIVE
+    jmp     dos_set_error
 
 ; AH=4Eh - Find first matching file
 ; Input: DS:DX = ASCIIZ filespec with wildcards, CX = attribute mask
@@ -833,9 +1068,23 @@ ff_search_loop:
     cmp     ax, [fat_eoc_min]       ; End of chain?
     jae     .ff_no_more
 
-    ; Convert cluster to sector and read
+    ; Convert cluster to first sector
     call    fat_cluster_to_lba
-    mov     [search_dir_sector], ax ; Save sector for DTA
+    jc      .ff_error
+    mov     [search_dir_sector], ax ; Save first LBA of cluster
+    ; Get sectors per cluster
+    push    bx
+    mov     bx, [active_dpb]
+    xor     ah, ah
+    mov     al, [bx + DPB_SEC_PER_CLUS]
+    inc     ax
+    mov     [ff_sub_secs], ax
+    pop     bx
+
+.ff_sub_next_sec:
+    cmp     word [ff_sub_secs], 0
+    jbe     .ff_next_cluster
+    mov     ax, [search_dir_sector]
     push    cs
     pop     es
     mov     bx, disk_buffer
@@ -921,7 +1170,15 @@ ff_search_loop:
     jmp     ff_search_loop
 
 .ff_next_cluster:
-    ; Subdirectory: advance to next cluster in chain
+    ; Subdirectory: try next sector within cluster first
+    dec     word [ff_sub_secs]
+    jz      .ff_advance_cluster
+    inc     word [search_dir_sector]
+    mov     word [search_dir_index], 0
+    jmp     .ff_sub_next_sec
+
+.ff_advance_cluster:
+    ; All sectors in cluster done - advance to next cluster in chain
     mov     ax, [search_dir_cluster]
     call    fat_get_next_cluster
     mov     [search_dir_cluster], ax
@@ -1016,8 +1273,9 @@ ff_search_loop:
     mov     ax, ERR_READ_FAULT
     jmp     dos_set_error
 
-; Local variable for FindFirst root directory end sector
-ff_root_end    dw  33              ; Default: 19 + 14 = 33 for FAT12 floppy
+; Local variables for FindFirst/FindNext
+ff_root_end     dw  33              ; Default: 19 + 14 = 33 for FAT12 floppy
+ff_sub_secs     dw  0              ; Sectors remaining in current cluster
 
 ; ---------------------------------------------------------------------------
 ; ff_name_to_pattern - Convert ASCIIZ filespec to FCB pattern with wildcards
