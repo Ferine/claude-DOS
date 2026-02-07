@@ -31,6 +31,16 @@ make run      # Launch in QEMU
 
 ![ClaudeDOS boot sequence](docs/screenshots/boot.png)
 
+### Run Any DOS App
+
+```bash
+./scripts/run_app.sh tests/doom DOOM.EXE          # Boot with DOOM on C:
+./scripts/run_app.sh tests/Quake QUAKE.EXE -m 32  # Quake with 32MB RAM
+make run-app APP=tests/doom EXE=DOOM.EXE           # Same, via Makefile
+```
+
+The script walks the app directory, maps all files to DOS 8.3 names on a FAT16 hard disk image, optionally creates an AUTOEXEC.BAT to auto-run the executable, and launches QEMU. Options: `-m N` (RAM in MB), `-s` (serial console), `-n` (build only).
+
 ### More Targets
 
 ```bash

@@ -57,7 +57,7 @@ $(IMGDIR)/%.com: tests/%.asm $(wildcard $(KERNDIR)/inc/*.inc) | $(IMGDIR)
 
 HD_IMG   := $(IMGDIR)/hd.img
 
-.PHONY: all floppy hd run run-serial run-hd run-hd-serial debug clean tools
+.PHONY: all floppy hd run run-serial run-hd run-hd-serial debug clean tools run-app
 
 all: floppy
 
@@ -167,6 +167,11 @@ run-quake: floppy quake-hd
 
 run-quake-serial: floppy quake-hd
 	$(QEMU) -fda $(FLOPPY) -hda $(QUAKE_HD) -boot a -m 32 -nographic -serial mon:stdio $(AUDIO_OPTS)
+
+# --- Generic App Launcher ---
+run-app:
+	@if [ -z "$(APP)" ]; then echo "Usage: make run-app APP=tests/doom [EXE=DOOM.EXE] [MEM=32]"; exit 1; fi
+	./scripts/run_app.sh $(APP) $(EXE) -m $(or $(MEM),32)
 
 debug: floppy
 	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -S -s -display cocoa $(AUDIO_OPTS) &
