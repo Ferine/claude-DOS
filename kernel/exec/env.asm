@@ -83,11 +83,10 @@ env_create_with_path:
     ; Save environment size (includes double-NUL)
     mov     [cs:.env_size], cx
 
-    ; Add space for: count word (2) + "A:\" (3) + filename + NUL
+    ; Add space for count word
     add     cx, 2               ; Count word
-    add     cx, 3               ; "A:\" prefix
 
-    ; Measure program filename
+    ; Measure program filename and determine path prefix needed
     push    cx
     mov     es, [cs:.prog_name_seg]
     mov     di, [cs:.prog_name_off]
@@ -100,7 +99,62 @@ env_create_with_path:
     jnz     .measure_name
     ; CX = length including NUL
     mov     [cs:.name_len], cx
+
+    ; Determine prefix based on filename format:
+    ; Case A: "C:\path\file" (has drive letter) - no prefix needed
+    ; Case B: "\path\file" (absolute, no drive) - prefix = "D:" (2 bytes)
+    ; Case C: "file" (relative) - prefix = "D:\" or "D:\curdir\" with curdir
+    mov     es, [cs:.prog_name_seg]
+    mov     di, [cs:.prog_name_off]
+    cmp     byte [es:di + 1], ':'
+    jne     .prefix_no_drive
+    ; Case A: filename already has drive letter
+    mov     byte [cs:.path_case], 0
+    mov     word [cs:.prefix_len], 0
+    jmp     .prefix_measured
+
+.prefix_no_drive:
+    cmp     byte [es:di], '\'
+    jne     .prefix_relative
+    ; Case B: absolute path without drive letter - need "D:" prefix
+    mov     byte [cs:.path_case], 1
+    mov     word [cs:.prefix_len], 2
+    jmp     .prefix_measured
+
+.prefix_relative:
+    ; Case C: relative path - need "D:\" + optional current_dir_path + "\"
+    mov     byte [cs:.path_case], 2
+    mov     word [cs:.prefix_len], 3    ; "D:\" minimum
+
+    ; Check if current_dir_path is non-empty (not at root)
+    push    ds
+    push    cs
+    pop     ds
+    cmp     byte [current_dir_path], 0
+    je      .prefix_at_root
+
+    ; Measure current_dir_path length
+    push    si
+    mov     si, current_dir_path
+    xor     ax, ax
+.measure_cwd:
+    cmp     byte [si], 0
+    je      .cwd_measured
+    inc     si
+    inc     ax
+    jmp     .measure_cwd
+.cwd_measured:
+    pop     si
+    ; prefix = 3 (D:\) + cwd_len + 1 (trailing \)
+    add     ax, 4                   ; 3 for "D:\" + 1 for trailing "\"
+    mov     [cs:.prefix_len], ax
+
+.prefix_at_root:
+    pop     ds
+
+.prefix_measured:
     pop     cx
+    add     cx, [cs:.prefix_len]
     add     cx, [cs:.name_len]
 
     ; Round up to paragraphs: (cx + 15) / 16
@@ -210,14 +264,47 @@ env_create_with_path:
     mov     word [es:di], 0x0001
     add     di, 2
 
-    ; Add drive prefix "A:\"
-    mov     byte [es:di], 'A'
+    ; Build program path prefix based on path_case
+    cmp     byte [cs:.path_case], 0
+    je      .build_no_prefix            ; Case A: no prefix
+
+    ; Cases B and C: write drive letter
+    push    ds
+    push    cs
+    pop     ds
+    mov     al, [current_drive]         ; 0=A:, 1=B:, 2=C:, etc.
+    add     al, 'A'
+    mov     [es:di], al
     inc     di
     mov     byte [es:di], ':'
     inc     di
+
+    cmp     byte [cs:.path_case], 1
+    je      .build_prefix_done          ; Case B: just "D:", name has "\"
+
+    ; Case C: add "\" after drive letter
     mov     byte [es:di], '\'
     inc     di
 
+    ; If current_dir_path is non-empty, add it + trailing "\"
+    cmp     byte [current_dir_path], 0
+    je      .build_prefix_done
+    mov     si, current_dir_path
+.copy_cwd:
+    lodsb
+    test    al, al
+    jz      .cwd_copied
+    mov     [es:di], al
+    inc     di
+    jmp     .copy_cwd
+.cwd_copied:
+    mov     byte [es:di], '\'
+    inc     di
+
+.build_prefix_done:
+    pop     ds
+
+.build_no_prefix:
     ; Copy program filename
     mov     ds, [cs:.prog_name_seg]
     mov     si, [cs:.prog_name_off]
@@ -275,6 +362,8 @@ env_create_with_path:
 .env_size       dw  0
 .name_len       dw  0
 .new_env_seg    dw  0
+.path_case      db  0               ; 0=has drive, 1=absolute, 2=relative
+.prefix_len     dw  0               ; Bytes needed for path prefix
 
 ; Debug helper: print AX as hex
 .dbg_hex_ax:

@@ -415,10 +415,21 @@ int21_4B:
     call    build_psp
     pop     ds                      ; DS = kernel
 
-    ; Set PSP memory top (offset 0x02) to top of conventional memory
-    ; DOS programs expect all memory from PSP to top of conventional RAM
-    ; Hardcode to 0xA000 (640KB) for maximum compatibility
-    mov     word [es:0x02], 0xA000  ; Set PSP memory top to 640KB boundary
+    ; Set PSP memory top (offset 0x02) to top of allocated block
+    ; Real DOS sets this to child_seg + MCB block size (first segment past allocation)
+    push    ax
+    push    dx
+    mov     ax, [exec_child_seg]
+    dec     ax                      ; AX = MCB segment
+    push    es
+    mov     es, ax
+    mov     dx, [es:3]             ; DX = block size in paragraphs
+    pop     es
+    mov     ax, [exec_child_seg]
+    add     ax, dx                  ; AX = first segment past allocated block
+    mov     [es:0x02], ax           ; Set PSP memory top
+    pop     dx
+    pop     ax
 
     ; Save parent's INT 22h/23h/24h vectors into child PSP
     push    es
@@ -948,6 +959,61 @@ int21_4C:
     ; If parent == current (shell trying to exit), halt
     cmp     bx, ax
     je      .halt_system
+
+    ; Close all open file handles owned by the child process
+    ; Walk the child's handle table and decrement SFT ref counts
+    ; This prevents SFT exhaustion when programs exit with open files
+    push    bx                      ; Save parent PSP
+    push    ax                      ; Save child PSP
+
+    ; ES = child PSP from above
+    ; Get handle count
+    mov     cx, [es:0x32]
+    test    cx, cx
+    jnz     .cleanup_have_count
+    mov     cx, MAX_HANDLES
+.cleanup_have_count:
+    ; Get handle table pointer from PSP
+    mov     di, [es:0x34]           ; Handle table offset
+    mov     dx, [es:0x36]           ; Handle table segment
+    test    dx, dx
+    jnz     .cleanup_have_ptr
+    mov     dx, es                  ; Default: PSP segment
+    mov     di, 0x18                ; Default: offset 0x18
+.cleanup_have_ptr:
+    push    es
+    mov     es, dx                  ; ES:DI = handle table base
+
+    xor     bx, bx                  ; Handle index
+.cleanup_loop:
+    cmp     bx, cx
+    jae     .cleanup_done
+
+    mov     al, [es:di + bx]       ; SFT index for this handle
+    cmp     al, 0xFF
+    je      .cleanup_next           ; Unused handle slot
+
+    ; Decrement SFT ref count (for all handles, including inherited ones)
+    push    ax
+    push    di
+    push    cx
+    push    bx
+    xor     ah, ah
+    call    sft_dealloc             ; Decrements ref_count, frees SFT if 0
+    pop     bx
+    pop     cx
+    pop     di
+    pop     ax
+
+.cleanup_next:
+    inc     bx
+    jmp     .cleanup_loop
+
+.cleanup_done:
+    pop     es                      ; Restore ES = child PSP
+
+    pop     ax                      ; Restore child PSP
+    pop     bx                      ; Restore parent PSP
 
     ; Free child memory: walk MCB chain, free all blocks owned by current
     push    bx                      ; Save parent PSP

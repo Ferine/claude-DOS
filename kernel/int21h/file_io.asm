@@ -435,6 +435,10 @@ int21_3C_common:
     jmp     dos_set_error
 
 .cr_truncate_ok:
+    ; Check if file is read-only - deny truncation
+    test    byte [di + 11], ATTR_READ_ONLY
+    jnz     .cr_access_denied
+
     ; File exists at DI, sector in AX
     ; Save location
     mov     [search_dir_sector], ax
@@ -557,6 +561,17 @@ int21_3C_common:
     mov     ax, ERR_TOO_MANY_FILES
     jmp     dos_set_error
 
+.cr_access_denied:
+    ; Also used when file is read-only
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_ACCESS_DENIED
+    jmp     dos_set_error
+
 .cr_read_error:
     pop     ax
     pop     cx
@@ -665,6 +680,17 @@ int21_3D:
     jc      .open_not_found
 
     ; DI = pointer to dir entry in disk_buffer, AX = sector number
+    ; Reject opening a read-only file for write or read-write
+    test    byte [di + 11], ATTR_READ_ONLY
+    jz      .open_attr_ok
+    mov     cl, [save_ax]
+    and     cl, 0x07                ; Access mode bits
+    cmp     cl, OPEN_WRITE
+    je      .open_access_denied
+    cmp     cl, OPEN_READWRITE
+    je      .open_access_denied
+.open_attr_ok:
+
     ; Save directory entry info before sft_alloc (which might use DI)
     mov     [search_dir_sector], ax
     ; Calculate dir_index from DI offset
@@ -771,6 +797,16 @@ int21_3D:
     pop     si
     pop     es
     mov     ax, ERR_TOO_MANY_FILES
+    jmp     dos_set_error
+
+.open_access_denied:
+    pop     dx
+    pop     cx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_ACCESS_DENIED
     jmp     dos_set_error
 
 .open_not_found:
@@ -2836,6 +2872,17 @@ int21_6C:
     jmp     .ext_exists_fail            ; Unknown = fail
 
 .ext_exists_open:
+    ; Reject opening a read-only file for write or read-write
+    test    byte [di + 11], ATTR_READ_ONLY
+    jz      .ext_open_attr_ok
+    mov     cl, [save_ax]
+    and     cl, 0x07                    ; Access mode bits
+    cmp     cl, OPEN_WRITE
+    je      .ext_access_denied
+    cmp     cl, OPEN_READWRITE
+    je      .ext_access_denied
+.ext_open_attr_ok:
+
     ; Open existing file (same as 3Dh open path)
     ; DI = dir entry, AX = sector
     mov     [search_dir_sector], ax
@@ -2913,6 +2960,10 @@ int21_6C:
     jmp     .ext_success
 
 .ext_exists_replace:
+    ; Reject replacing a read-only file
+    test    byte [di + 11], ATTR_READ_ONLY
+    jnz     .ext_access_denied
+
     ; Replace/truncate existing file - first free its clusters
     mov     [search_dir_sector], ax
     push    ax
@@ -3273,6 +3324,16 @@ int21_6C:
     pop     si
     pop     es
     mov     ax, ERR_WRITE_FAULT
+    jmp     dos_set_error
+
+.ext_access_denied:
+    pop     bp
+    pop     dx
+    pop     bx
+    pop     di
+    pop     si
+    pop     es
+    mov     ax, ERR_ACCESS_DENIED
     jmp     dos_set_error
 
 .ext_exists_fail:

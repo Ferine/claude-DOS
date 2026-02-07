@@ -23,9 +23,9 @@ build_psp:
     ; INT 20h instruction at PSP:0000
     mov     word [es:0x00], 0x20CD  ; CD 20 = INT 20h
     
-    ; Memory top - set to top of allocated block
-    ; (Caller should set this properly)
-    mov     word [es:0x02], 0xA000  ; Default: 640K boundary
+    ; Memory top - default placeholder, caller must set this properly
+    ; after build_psp returns (computed from actual MCB block size)
+    mov     word [es:0x02], 0xA000  ; Default: overwritten by EXEC
     
     ; Far call to DOS at PSP:0005
     mov     byte [es:0x05], 0x9A    ; CALL FAR opcode
