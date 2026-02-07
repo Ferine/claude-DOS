@@ -160,9 +160,67 @@ int21_2A:
 .date_month     db  0
 .date_day       db  0
 
-; AH=2Bh - Set date (stub)
+; AH=2Bh - Set date
+; Input: CX = year (1980-2099), DH = month (1-12), DL = day (1-31)
+; Output: AL = 0 on success, 0xFF on invalid input
 int21_2B:
-    mov     byte [save_ax], 0   ; AL=0 = success
+    ; Validate year
+    mov     cx, [save_cx]
+    cmp     cx, 1980
+    jb      .setdate_invalid
+    cmp     cx, 2099
+    ja      .setdate_invalid
+
+    ; Validate month
+    mov     al, [save_dx + 1]       ; DH = month
+    test    al, al
+    jz      .setdate_invalid
+    cmp     al, 12
+    ja      .setdate_invalid
+
+    ; Validate day
+    mov     al, [save_dx]           ; DL = day
+    test    al, al
+    jz      .setdate_invalid
+    cmp     al, 31
+    ja      .setdate_invalid
+
+    ; Convert year to century + year
+    mov     ax, [save_cx]           ; AX = full year
+    xor     dx, dx
+    mov     bx, 100
+    div     bx                      ; AX = century, DX = year within century
+
+    ; Convert century to BCD
+    push    dx
+    call    bin_to_bcd
+    mov     ch, al                  ; CH = century (BCD)
+    pop     ax                      ; AL = year within century
+
+    ; Convert year to BCD
+    call    bin_to_bcd
+    mov     cl, al                  ; CL = year (BCD)
+
+    ; Convert month to BCD
+    mov     al, [save_dx + 1]
+    call    bin_to_bcd
+    mov     dh, al                  ; DH = month (BCD)
+
+    ; Convert day to BCD
+    mov     al, [save_dx]
+    call    bin_to_bcd
+    mov     dl, al                  ; DL = day (BCD)
+
+    ; Call INT 1Ah AH=05h - Set RTC Date
+    mov     ah, 0x05
+    int     0x1A
+
+    mov     byte [save_ax], 0       ; AL = 0 = success
+    call    dos_clear_error
+    ret
+
+.setdate_invalid:
+    mov     byte [save_ax], 0xFF    ; AL = 0xFF = invalid
     call    dos_clear_error
     ret
 
@@ -190,9 +248,53 @@ int21_2C:
     call    dos_clear_error
     ret
 
-; AH=2Dh - Set time (stub)
+; AH=2Dh - Set time
+; Input: CH = hour (0-23), CL = minute (0-59), DH = second (0-59), DL = centisecond
+; Output: AL = 0 on success, 0xFF on invalid input
 int21_2D:
-    mov     byte [save_ax], 0   ; Success
+    ; Validate hour
+    mov     al, [save_cx + 1]       ; CH = hour
+    cmp     al, 23
+    ja      .settime_invalid
+
+    ; Validate minute
+    mov     al, [save_cx]           ; CL = minute
+    cmp     al, 59
+    ja      .settime_invalid
+
+    ; Validate second
+    mov     al, [save_dx + 1]       ; DH = second
+    cmp     al, 59
+    ja      .settime_invalid
+
+    ; Convert hour to BCD
+    mov     al, [save_cx + 1]
+    call    bin_to_bcd
+    mov     ch, al                  ; CH = hour (BCD)
+
+    ; Convert minute to BCD
+    mov     al, [save_cx]
+    call    bin_to_bcd
+    mov     cl, al                  ; CL = minute (BCD)
+
+    ; Convert second to BCD
+    mov     al, [save_dx + 1]
+    call    bin_to_bcd
+    mov     dh, al                  ; DH = second (BCD)
+
+    ; DL = 0 (no DST info)
+    xor     dl, dl
+
+    ; Call INT 1Ah AH=03h - Set RTC Time
+    mov     ah, 0x03
+    int     0x1A
+
+    mov     byte [save_ax], 0       ; AL = 0 = success
+    call    dos_clear_error
+    ret
+
+.settime_invalid:
+    mov     byte [save_ax], 0xFF    ; AL = 0xFF = invalid
     call    dos_clear_error
     ret
 
@@ -849,5 +951,20 @@ bcd_to_bin:
     mul     ch                  ; AX = high * 10
     and     cl, 0x0F            ; Low nibble
     add     al, cl
+    pop     cx
+    ret
+
+; ---------------------------------------------------------------------------
+; bin_to_bcd - Convert binary byte to BCD
+; Input: AL = binary value (0-99)
+; Output: AL = BCD value
+; ---------------------------------------------------------------------------
+bin_to_bcd:
+    push    cx
+    xor     ah, ah
+    mov     cl, 10
+    div     cl                  ; AL = quotient (tens), AH = remainder (ones)
+    shl     al, 4               ; High nibble = tens
+    or      al, ah              ; Low nibble = ones
     pop     cx
     ret

@@ -16,11 +16,129 @@ int21_00:
     ret
 
 ; ---------------------------------------------------------------------------
+; Redirection helpers - check if stdout/stdin is redirected to a file
+; These call handle_to_sft and check bit 15 of SFT flags.
+; Bit 15 set = character device, bit 15 clear = disk file (redirected)
+; Output: CF set = redirected to file, CF clear = device
+; Preserves: all registers except flags
+; ---------------------------------------------------------------------------
+check_stdout_redirected:
+    push    bx
+    push    di
+    mov     bx, STDOUT
+    call    handle_to_sft
+    jc      .stdout_is_device       ; Invalid handle - treat as device
+    test    word [di + SFT_ENTRY.flags], 0x8000
+    jnz     .stdout_is_device       ; Bit 15 set = device
+    ; Bit 15 clear = file (redirected)
+    pop     di
+    pop     bx
+    stc
+    ret
+.stdout_is_device:
+    pop     di
+    pop     bx
+    clc
+    ret
+
+check_stdin_redirected:
+    push    bx
+    push    di
+    mov     bx, STDIN
+    call    handle_to_sft
+    jc      .stdin_is_device        ; Invalid handle - treat as device
+    test    word [di + SFT_ENTRY.flags], 0x8000
+    jnz     .stdin_is_device        ; Bit 15 set = device
+    ; Bit 15 clear = file (redirected)
+    pop     di
+    pop     bx
+    stc
+    ret
+.stdin_is_device:
+    pop     di
+    pop     bx
+    clc
+    ret
+
+; ---------------------------------------------------------------------------
+; char_write_to_handle - Write 1 byte to STDOUT via int21_40
+; Input: AL = byte to write
+; Preserves all save_* values except save_ax (set to bytes written)
+; ---------------------------------------------------------------------------
+char_write_to_handle:
+    push    ax
+    ; Save caller's save_* values
+    push    word [save_bx]
+    push    word [save_cx]
+    push    word [save_dx]
+    push    word [save_ds]
+
+    ; Store the byte in a temp buffer
+    mov     [.cw_byte], al
+
+    ; Set up for int21_40: BX=STDOUT, CX=1, DS:DX=.cw_byte
+    mov     word [save_bx], STDOUT
+    mov     word [save_cx], 1
+    mov     word [save_dx], .cw_byte
+    mov     word [save_ds], cs
+    call    int21_40
+
+    ; Restore caller's save_* values
+    pop     word [save_ds]
+    pop     word [save_dx]
+    pop     word [save_cx]
+    pop     word [save_bx]
+    pop     ax
+    ret
+
+.cw_byte    db  0
+
+; ---------------------------------------------------------------------------
+; char_read_from_handle - Read 1 byte from STDIN via int21_3F
+; Output: AL = byte read, CF set if 0 bytes read (EOF)
+; ---------------------------------------------------------------------------
+char_read_from_handle:
+    ; Save caller's save_* values
+    push    word [save_bx]
+    push    word [save_cx]
+    push    word [save_dx]
+    push    word [save_ds]
+
+    ; Set up for int21_3F: BX=STDIN, CX=1, DS:DX=.cr_byte
+    mov     word [save_bx], STDIN
+    mov     word [save_cx], 1
+    mov     word [save_dx], .cr_byte
+    mov     word [save_ds], cs
+    call    int21_3F
+
+    ; Restore caller's save_* values
+    pop     word [save_ds]
+    pop     word [save_dx]
+    pop     word [save_cx]
+    pop     word [save_bx]
+
+    ; Check if we got 0 bytes (EOF)
+    cmp     word [save_ax], 0
+    je      .cr_eof
+    mov     al, [.cr_byte]
+    clc
+    ret
+.cr_eof:
+    xor     al, al
+    stc
+    ret
+
+.cr_byte    db  0
+
+; ---------------------------------------------------------------------------
 ; INT 21h AH=01h - Character Input with Echo
 ; Returns: AL = character
 ; ---------------------------------------------------------------------------
 int21_01:
-    ; Wait for keypress via BIOS INT 16h
+    call    check_stdin_redirected
+    jc      .redir_input
+
+    ; Device: Wait for keypress via BIOS INT 16h
     xor     ah, ah
     int     0x16                ; AH=scancode, AL=ASCII
     ; Echo to screen
@@ -34,11 +152,28 @@ int21_01:
     call    dos_clear_error
     ret
 
+.redir_input:
+    ; Redirected: read 1 byte from handle, no echo (standard DOS behavior)
+    call    char_read_from_handle
+    jc      .redir_eof
+    mov     byte [save_ax], al
+    call    dos_clear_error
+    ret
+.redir_eof:
+    ; Return Ctrl+Z (0x1A) on EOF
+    mov     byte [save_ax], 0x1A
+    call    dos_clear_error
+    ret
+
 ; ---------------------------------------------------------------------------
 ; INT 21h AH=02h - Character Output
 ; Input: DL = character to output
 ; ---------------------------------------------------------------------------
 int21_02:
+    call    check_stdout_redirected
+    jc      .redir_output
+
+    ; Device: output via BIOS
     mov     al, [save_dx]       ; DL from caller
     cmp     al, BEL_CHAR        ; Check for bell character
     jne     .normal_output
@@ -50,6 +185,15 @@ int21_02:
     int     0x10
 .done:
     ; Return character in AL
+    mov     al, [save_dx]
+    mov     byte [save_ax], al
+    call    dos_clear_error
+    ret
+
+.redir_output:
+    ; Redirected: write 1 byte via int21_40
+    mov     al, [save_dx]
+    call    char_write_to_handle
     mov     al, [save_dx]
     mov     byte [save_ax], al
     call    dos_clear_error
@@ -84,7 +228,11 @@ int21_06:
     cmp     al, 0xFF
     je      .input
 
-    ; Output character - check for bell
+    ; Output mode
+    call    check_stdout_redirected
+    jc      .output_redir
+
+    ; Device output - check for bell
     cmp     al, BEL_CHAR
     jne     .output_char
     call    speaker_beep
@@ -98,8 +246,19 @@ int21_06:
     mov     byte [save_ax], al
     ret
 
+.output_redir:
+    ; Redirected output
+    mov     al, [save_dx]
+    call    char_write_to_handle
+    mov     al, [save_dx]
+    mov     byte [save_ax], al
+    ret
+
 .input:
-    ; Check if key available
+    call    check_stdin_redirected
+    jc      .input_redir
+
+    ; Device input: Check if key available
     mov     ah, 0x01
     int     0x16
     jz      .no_key
@@ -118,14 +277,39 @@ int21_06:
     call    dos_clear_error
     ret
 
+.input_redir:
+    ; Redirected input: read 1 byte
+    call    char_read_from_handle
+    jc      .input_redir_eof
+    mov     byte [save_ax], al
+    call    dos_clear_error
+    ret
+.input_redir_eof:
+    mov     byte [save_ax], 0
+    ; Set ZF to indicate no character
+    call    dos_clear_error
+    ret
+
 ; ---------------------------------------------------------------------------
 ; INT 21h AH=07h - Direct Input Without Echo
 ; Returns: AL = character
 ; ---------------------------------------------------------------------------
 int21_07:
+    call    check_stdin_redirected
+    jc      .redir
+
     xor     ah, ah
     int     0x16
     mov     byte [save_ax], al
+    ret
+
+.redir:
+    call    char_read_from_handle
+    jc      .redir_eof
+    mov     byte [save_ax], al
+    ret
+.redir_eof:
+    mov     byte [save_ax], 0x1A    ; Ctrl+Z on EOF
     ret
 
 ; ---------------------------------------------------------------------------
@@ -133,6 +317,9 @@ int21_07:
 ; Returns: AL = character
 ; ---------------------------------------------------------------------------
 int21_08:
+    call    check_stdin_redirected
+    jc      .redir
+
     xor     ah, ah
     int     0x16
     cmp     al, 0x03            ; Ctrl+C?
@@ -144,12 +331,30 @@ int21_08:
     int     0x23
     jmp     int21_08            ; Retry
 
+.redir:
+    call    char_read_from_handle
+    jc      .redir_eof
+    cmp     al, 0x03            ; Ctrl+C in redirected input?
+    je      .redir_ctrl_c
+    mov     byte [save_ax], al
+    ret
+.redir_ctrl_c:
+    int     0x23
+    jmp     .redir              ; Retry read
+.redir_eof:
+    mov     byte [save_ax], 0x1A    ; Ctrl+Z on EOF
+    ret
+
 ; ---------------------------------------------------------------------------
 ; INT 21h AH=09h - Print String
 ; Input: DS:DX = pointer to '$'-terminated string
 ; (Caller's DS:DX)
 ; ---------------------------------------------------------------------------
 int21_09:
+    call    check_stdout_redirected
+    jc      .redir_print
+
+    ; Device: output via BIOS
     push    es
     push    si
 
@@ -172,6 +377,48 @@ int21_09:
     inc     si
     jmp     .print_loop
 .print_done:
+    pop     si
+    pop     es
+    call    dos_clear_error
+    ret
+
+.redir_print:
+    ; Redirected: count chars to '$', then write via int21_40
+    push    es
+    push    si
+    push    cx
+
+    mov     es, [save_ds]
+    mov     si, [save_dx]
+
+    ; Count characters up to '$'
+    xor     cx, cx
+.count_loop:
+    mov     al, [es:si]
+    cmp     al, '$'
+    je      .count_done
+    inc     si
+    inc     cx
+    jmp     .count_loop
+.count_done:
+    ; CX = number of bytes to write
+    test    cx, cx
+    jz      .redir_print_done
+
+    ; Save and set up for int21_40
+    push    word [save_bx]
+    push    word [save_cx]
+    ; save_ds and save_dx already point to the string
+
+    mov     word [save_bx], STDOUT
+    mov     [save_cx], cx
+    call    int21_40
+
+    pop     word [save_cx]
+    pop     word [save_bx]
+
+.redir_print_done:
+    pop     cx
     pop     si
     pop     es
     call    dos_clear_error
@@ -596,6 +843,9 @@ int21_0A:
 ; Returns: AL = 0xFF if character available, 0x00 if not
 ; ---------------------------------------------------------------------------
 int21_0B:
+    call    check_stdin_redirected
+    jc      .redir
+
     mov     ah, 0x01
     int     0x16
     jz      .no_char
@@ -603,6 +853,12 @@ int21_0B:
     ret
 .no_char:
     mov     byte [save_ax], 0x00
+    ret
+
+.redir:
+    ; Redirected stdin: always return 0xFF (ready)
+    ; Caller handles EOF when read returns 0 bytes
+    mov     byte [save_ax], 0xFF
     ret
 
 ; ---------------------------------------------------------------------------

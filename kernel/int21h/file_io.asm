@@ -879,15 +879,22 @@ int21_3E:
 
 ; AH=3Fh - Read file/device
 int21_3F:
-    ; Check if handle is a device (0-4 are standard handles)
     mov     bx, [save_bx]       ; File handle
+    push    bx
+    call    handle_to_sft
+    jc      .read_check_fail
+    test    word [di + SFT_ENTRY.flags], 0x8000
+    pop     bx
+    jz      .read_disk_file      ; File (bit 15 clear)
+    ; Device - check if stdin for keyboard input
     cmp     bx, STDIN
     je      .read_stdin
-    cmp     bx, 4
-    jbe     .read_device
+    jmp     .read_device
 
-    ; Disk file read
-    jmp     .read_disk_file
+.read_check_fail:
+    pop     bx
+    mov     ax, ERR_INVALID_HANDLE
+    jmp     dos_set_error
 
 .read_stdin:
     ; Read from keyboard
@@ -1171,15 +1178,18 @@ int21_3F:
 ; AH=40h - Write file/device
 int21_40:
     mov     bx, [save_bx]
+    push    bx
+    call    handle_to_sft
+    jc      .write_check_fail
+    test    word [di + SFT_ENTRY.flags], 0x8000
+    pop     bx
+    jz      .write_disk_file        ; File (bit 15 clear)
+    ; Device - check if stdout/stderr for screen output
     cmp     bx, STDOUT
     je      .write_stdout
     cmp     bx, STDERR
     je      .write_stdout
-    cmp     bx, 4
-    jbe     .write_device
-
-    ; Disk file write
-    jmp     .write_disk_file
+    jmp     .write_device
 
 .write_stdout:
     push    es
@@ -1207,6 +1217,11 @@ int21_40:
     pop     es
     call    dos_clear_error
     ret
+
+.write_check_fail:
+    pop     bx
+    mov     ax, ERR_INVALID_HANDLE
+    jmp     dos_set_error
 
 .write_device:
     mov     ax, [save_cx]
@@ -2028,14 +2043,19 @@ int21_44:
     ret
 
 .ioctl_get_info:
-    ; Return device info word in DX
+    ; Return device info word in DX based on SFT flags
     mov     bx, [save_bx]
-    cmp     bx, 4
-    ja      .ioctl_file
-    ; Standard device handle
+    call    handle_to_sft
+    jc      .ioctl_get_info_bad
+    test    word [di + SFT_ENTRY.flags], 0x8000
+    jz      .ioctl_file
+    ; Character device
     mov     word [save_dx], 0x80D3  ; Character device, STDIN/STDOUT
     call    dos_clear_error
     ret
+.ioctl_get_info_bad:
+    mov     ax, ERR_INVALID_HANDLE
+    jmp     dos_set_error
 .ioctl_file:
     mov     word [save_dx], 0x0000  ; File on drive A:
     call    dos_clear_error
