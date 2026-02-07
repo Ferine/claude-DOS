@@ -6,3 +6,4 @@ tests/target/
 *.o
 .DS_Store
 /test_results
+/tests/doom

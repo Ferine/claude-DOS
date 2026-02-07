@@ -537,7 +537,16 @@ int21_0A:
     test    dl, dl
     jz      .input_loop         ; At start - nothing to delete
 
-    dec     dl                  ; Move cursor left
+    dec     dl                  ; Move buffer cursor left
+    ; Move visual cursor left
+    push    ax
+    push    bx
+    mov     ah, 0x0E
+    xor     bx, bx
+    mov     al, 0x08
+    int     0x10
+    pop     bx
+    pop     ax
     ; Fall through to delete-at-cursor logic
 
 .delete_at_cursor:
@@ -568,6 +577,20 @@ int21_0A:
     pop     cx
     dec     cl                  ; Decrement length
 
+    ; If cursor is now at end (deleted last char), simple erase
+    cmp     dl, cl
+    jne     .delete_middle
+    ; Erase: print space then backspace
+    push    bx
+    mov     ah, 0x0E
+    xor     bx, bx
+    mov     al, ' '
+    int     0x10
+    mov     al, 0x08
+    int     0x10
+    pop     bx
+    jmp     .input_loop
+.delete_middle:
     ; Redraw the line from cursor position onward
     call    .redraw_from_cursor
     jmp     .input_loop
