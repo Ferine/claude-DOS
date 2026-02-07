@@ -7,3 +7,4 @@ tests/target/
 .DS_Store
 /test_results
 /tests/doom
+/tests/Quake

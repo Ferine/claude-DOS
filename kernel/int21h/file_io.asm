@@ -1807,9 +1807,21 @@ int21_42:
     mov     cx, ax                      ; CX = target cluster index
     pop     bx
 
-    ; Walk chain
+    ; Optimize: walk forward from current position if target >= rel_cluster
+    cmp     cx, [cs:bp + SFT_ENTRY.rel_cluster]
+    jb      .seek_from_start
+
+    ; Walk forward from current cluster position
+    mov     ax, [cs:bp + SFT_ENTRY.cur_cluster]
+    mov     bx, [cs:bp + SFT_ENTRY.rel_cluster]
+    cmp     bx, cx
+    jae     .seek_found             ; Already at or past target
+    jmp     .walk_loop
+
+.seek_from_start:
+    ; Walk from beginning of chain
     mov     ax, [cs:bp + SFT_ENTRY.first_cluster]
-    xor     bx, bx                  ; Current index
+    xor     bx, bx                  ; Current index = 0
     test    cx, cx
     jz      .seek_found
 

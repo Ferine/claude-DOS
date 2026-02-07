@@ -298,7 +298,7 @@ xms_move_emb:
     mov     [cs:xms_move_struct_off], si
     mov     [cs:xms_move_struct_seg], ds
 
-    ; Get length - must be even, max 64KB per INT 15h call
+    ; Get length - must be even; copied in 64KB chunks via INT 15h
     mov     ax, [si]                ; Low word of length
     mov     dx, [si + 2]            ; High word of length
 
@@ -310,11 +310,10 @@ xms_move_emb:
     test    byte [si], 1
     jnz     .invalid_length
 
-    ; For now, support up to 64KB (we'd need to loop for larger)
-    cmp     word [si + 2], 0
-    jne     .too_large
-    cmp     word [si], 0            ; Check if > 64KB
-    je      .success                ; Zero length = success
+    ; Store remaining byte count for chunked copy loop
+    mov     ax, [si]                ; Reload low word (AX was modified by OR)
+    mov     [cs:xms_move_remain_lo], ax
+    mov     [cs:xms_move_remain_hi], dx
 
     ; Calculate source linear address
     mov     bx, [si + 4]            ; Source handle
@@ -383,54 +382,91 @@ xms_move_emb:
     mov     [cs:xms_move_dst_lo], ax
     mov     [cs:xms_move_dst_hi], dl
 
-    ; Build GDT for INT 15h AH=87h
-    ; GDT is 48 bytes: dummy(8) + GDT desc(8) + src(8) + dst(8) + BIOS CS(8) + BIOS SS(8)
+    ; === Chunked move loop: up to 64KB per INT 15h AH=87h call ===
+.move_loop:
+    ; Check if remaining bytes is zero
+    mov     ax, [cs:xms_move_remain_lo]
+    or      ax, [cs:xms_move_remain_hi]
+    jz      .success
+
+    ; Determine chunk size: min(remaining, 64KB)
+    ; CX = word count for this chunk
+    cmp     word [cs:xms_move_remain_hi], 0
+    jne     .full_chunk             ; remaining > 64KB, use full 64KB chunk
+    ; Partial (last) chunk: remaining fits in 16 bits
+    mov     cx, [cs:xms_move_remain_lo]
+    shr     cx, 1                   ; Bytes to words
+    jmp     .do_chunk
+
+.full_chunk:
+    mov     cx, 0x8000              ; 64KB = 0x8000 words
+
+.do_chunk:
+    ; Save word count (INT 15h may clobber CX)
+    mov     [cs:xms_move_chunk_words], cx
+
+    ; Build GDT for INT 15h AH=87h (48 bytes)
     push    cs
     pop     es
     mov     di, xms_gdt
 
-    ; Clear entire GDT first (48 bytes)
+    ; Clear entire GDT (48 bytes = 24 words)
     push    di
-    mov     cx, 24                  ; 24 words = 48 bytes
+    push    cx
+    mov     cx, 24
     xor     ax, ax
     rep     stosw
+    pop     cx
     pop     di
 
-    ; Source descriptor at offset 10h (16 bytes in)
-    ; Format: limit(2), base_lo(2), base_hi(1), access(1), reserved(2)
-    add     di, 10h
-    mov     word [es:di], 0xFFFF    ; Limit = 64KB
+    ; Source descriptor at GDT+10h
+    mov     word [es:di + 10h], 0xFFFF    ; Limit = 64KB
     mov     ax, [cs:xms_move_src_lo]
-    mov     [es:di + 2], ax         ; Base low word
+    mov     [es:di + 12h], ax             ; Base low word
     mov     al, [cs:xms_move_src_hi]
-    mov     [es:di + 4], al         ; Base high byte
-    mov     byte [es:di + 5], 93h   ; Access: present, data, writable
+    mov     [es:di + 14h], al             ; Base high byte
+    mov     byte [es:di + 15h], 93h       ; Access: present, data, writable
 
-    ; Dest descriptor at offset 18h (24 bytes in)
-    add     di, 8
-    mov     word [es:di], 0xFFFF    ; Limit = 64KB
+    ; Dest descriptor at GDT+18h
+    mov     word [es:di + 18h], 0xFFFF    ; Limit = 64KB
     mov     ax, [cs:xms_move_dst_lo]
-    mov     [es:di + 2], ax         ; Base low word
+    mov     [es:di + 1Ah], ax             ; Base low word
     mov     al, [cs:xms_move_dst_hi]
-    mov     [es:di + 4], al         ; Base high byte
-    mov     byte [es:di + 5], 93h   ; Access: present, data, writable
+    mov     [es:di + 1Ch], al             ; Base high byte
+    mov     byte [es:di + 1Dh], 93h       ; Access: present, data, writable
 
-    ; Call INT 15h AH=87h
-    ; ES:SI = GDT, CX = word count
+    ; Call INT 15h AH=87h: ES:SI = GDT, CX = word count
     mov     si, xms_gdt
-    mov     ds, [cs:xms_move_struct_seg]
-    push    si
-    mov     si, [cs:xms_move_struct_off]
-    mov     cx, [si]                ; Length in bytes
-    pop     si
-    shr     cx, 1                   ; Convert to word count
-
+    mov     cx, [cs:xms_move_chunk_words]
     mov     ah, 87h
-    ; Chain to original BIOS INT 15h
     pushf
     call    far [cs:int15_old_vector]
     jc      .bios_error
 
+    ; Advance addresses and subtract from remaining
+    ; Reload word count (INT 15h may have clobbered CX)
+    mov     cx, [cs:xms_move_chunk_words]
+    shl     cx, 1                   ; Words back to bytes (CF=1 if 64KB overflow)
+    jz      .advance_64k            ; 0x8000 words << 1 = 0x10000, overflows to 0
+
+    ; Partial chunk: advance by CX bytes
+    add     [cs:xms_move_src_lo], cx
+    adc     byte [cs:xms_move_src_hi], 0
+    add     [cs:xms_move_dst_lo], cx
+    adc     byte [cs:xms_move_dst_hi], 0
+    sub     [cs:xms_move_remain_lo], cx
+    sbb     word [cs:xms_move_remain_hi], 0
+    jmp     .move_loop
+
+.advance_64k:
+    ; Full 64KB chunk: advance addresses by 0x10000
+    inc     byte [cs:xms_move_src_hi]
+    inc     byte [cs:xms_move_dst_hi]
+    sub     word [cs:xms_move_remain_lo], 0
+    sbb     word [cs:xms_move_remain_hi], 1
+    jmp     .move_loop
+
+.success:
     ; Debug: print 'K' on success (to serial)
     push    ax
     push    dx
@@ -440,14 +476,8 @@ xms_move_emb:
     pop     dx
     pop     ax
 
-.success:
     mov     ax, 1
     xor     bl, bl
-    jmp     .done
-
-.too_large:
-    mov     ax, 0
-    mov     bl, 0A7h                ; Invalid length
     jmp     .done
 
 .invalid_length:
@@ -809,6 +839,9 @@ xms_move_src_lo     dw  0           ; Source linear address (low word)
 xms_move_src_hi     db  0           ; Source linear address (high byte)
 xms_move_dst_lo     dw  0           ; Dest linear address (low word)
 xms_move_dst_hi     db  0           ; Dest linear address (high byte)
+xms_move_remain_lo  dw  0           ; Remaining bytes to copy (low word)
+xms_move_remain_hi  dw  0           ; Remaining bytes to copy (high word)
+xms_move_chunk_words dw 0           ; Word count for current chunk
 
 ; GDT for INT 15h AH=87h (48 bytes)
 ; Structure: dummy(8) + GDT(8) + source(8) + dest(8) + BIOS_CS(8) + BIOS_SS(8)

@@ -142,6 +142,21 @@ load_exe:
     cmp     ax, [fat_eoc_min]
     jae     .load_done
 
+    ; Save cluster and convert to first LBA of cluster
+    mov     [.cur_cluster], ax
+    call    fat_cluster_to_lba
+    mov     [.cur_lba], ax
+
+    ; Get sectors per cluster from DPB
+    push    bx
+    mov     bx, [active_dpb]
+    xor     ch, ch
+    mov     cl, [bx + DPB_SEC_PER_CLUS]
+    inc     cx                      ; Actual count (DPB stores count-1)
+    pop     bx
+    mov     [.secs_remaining], cx
+
+.sector_in_cluster:
     ; Check if we've already loaded enough data (32-bit comparison)
     mov     cx, [.bytes_loaded + 2]     ; High word of bytes_loaded
     cmp     cx, [.bytes_to_load + 2]    ; Compare high words first
@@ -152,19 +167,17 @@ load_exe:
     jae     .load_done                  ; Stop when we've loaded the required amount
 .continue_loading:
 
-    push    ax                      ; Save cluster number
-
-    ; Read this cluster's sector into disk_buffer (kernel temp area)
+    ; Read current sector into disk_buffer (kernel temp area)
     push    es
     push    bx
     push    cs
     pop     es
     mov     bx, disk_buffer
-    call    fat_cluster_to_lba
+    mov     ax, [.cur_lba]
     call    fat_read_sector
     pop     bx
     pop     es
-    jc      .read_error_pop
+    jc      .read_error
 
     ; Should we skip this sector?
     cmp     dx, [.skip_sectors]
@@ -293,14 +306,14 @@ load_exe:
 
 .sector_done:
     inc     dx                      ; Sector count
+    inc     word [.cur_lba]         ; Next sector in cluster
+    dec     word [.secs_remaining]
+    jnz     .sector_in_cluster      ; More sectors in this cluster
 
-    pop     ax                      ; Restore cluster number
+    ; All sectors in cluster read, advance to next cluster
+    mov     ax, [.cur_cluster]
     call    fat_get_next_cluster
     jmp     .load_loop
-
-.read_error_pop:
-    pop     ax
-    jmp     .read_error
 
 .load_done:
     ; Apply relocations
@@ -599,6 +612,9 @@ load_exe:
 .reloc_partial     dd  0           ; Temp storage for boundary-crossing relocation
 .reloc_partial_len db  0           ; Bytes saved in partial buffer
 .reloc_boundary_flag db 0          ; Flag: 1 if last entry was boundary-crossing
+.cur_cluster       dw  0           ; Current cluster being read
+.cur_lba           dw  0           ; Current LBA sector being read
+.secs_remaining    dw  0           ; Sectors remaining in current cluster
 
 ; MZ Header offsets
 MZ_SIGNATURE       equ     0x00    ; 'MZ' signature

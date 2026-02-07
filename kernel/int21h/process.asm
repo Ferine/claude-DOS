@@ -1128,9 +1128,9 @@ int21_4D:
 ; AH=31h - Terminate and Stay Resident (TSR)
 ; Input: AL = return code, DX = paragraphs to keep resident
 int21_31:
-    ; Save return code
+    ; Save return code with TSR termination type
     mov     al, [save_ax]
-    xor     ah, ah
+    mov     ah, 3                   ; AH=3 = Terminate and Stay Resident
     mov     [return_code], ax
 
     ; Get current PSP and parent PSP
