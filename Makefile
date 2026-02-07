@@ -163,10 +163,10 @@ $(QUAKE_HD): $(MKFLOPPY) | $(IMGDIR)
 		$(QUAKE_DIR)/id1/config.cfg:ID1/CONFIG.CFG
 
 run-quake: floppy quake-hd
-	$(QEMU) -fda $(FLOPPY) -hda $(QUAKE_HD) -boot a -m 16 -display cocoa $(AUDIO_OPTS)
+	$(QEMU) -fda $(FLOPPY) -hda $(QUAKE_HD) -boot a -m 32 -display cocoa $(AUDIO_OPTS)
 
 run-quake-serial: floppy quake-hd
-	$(QEMU) -fda $(FLOPPY) -hda $(QUAKE_HD) -boot a -m 16 -nographic -serial mon:stdio $(AUDIO_OPTS)
+	$(QEMU) -fda $(FLOPPY) -hda $(QUAKE_HD) -boot a -m 32 -nographic -serial mon:stdio $(AUDIO_OPTS)
 
 debug: floppy
 	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -S -s -display cocoa $(AUDIO_OPTS) &
