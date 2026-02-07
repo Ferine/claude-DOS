@@ -23,6 +23,7 @@ int21_00:
 ; Preserves: all registers except flags
 ; ---------------------------------------------------------------------------
 check_stdout_redirected:
+    push    ax
     push    bx
     push    di
     mov     bx, STDOUT
@@ -33,15 +34,18 @@ check_stdout_redirected:
     ; Bit 15 clear = file (redirected)
     pop     di
     pop     bx
+    pop     ax
     stc
     ret
 .stdout_is_device:
     pop     di
     pop     bx
+    pop     ax
     clc
     ret
 
 check_stdin_redirected:
+    push    ax
     push    bx
     push    di
     mov     bx, STDIN
@@ -52,11 +56,13 @@ check_stdin_redirected:
     ; Bit 15 clear = file (redirected)
     pop     di
     pop     bx
+    pop     ax
     stc
     ret
 .stdin_is_device:
     pop     di
     pop     bx
+    pop     ax
     clc
     ret
 
@@ -233,6 +239,7 @@ int21_06:
     jc      .output_redir
 
     ; Device output - check for bell
+    mov     al, [save_dx]       ; Reload AL (clobbered by check)
     cmp     al, BEL_CHAR
     jne     .output_char
     call    speaker_beep
@@ -512,6 +519,15 @@ int21_0A:
     inc     cl                  ; Increment length
     inc     dl                  ; Advance cursor
 
+    ; If appending at end (cursor == length), just echo the character
+    cmp     dl, cl
+    jne     .insert_middle
+    ; Simple append - echo char directly
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    jmp     .input_loop
+.insert_middle:
     ; Redraw from cursor-1 position to end, then reposition cursor
     call    .redraw_from_cursor_minus1
     jmp     .input_loop
