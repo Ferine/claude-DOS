@@ -170,6 +170,26 @@ sb_dma_playing      db  0               ; 1 = DMA playback active
 sb_irq_fired        db  0               ; Set to 1 by IRQ handler (for polling)
 
 ; ---------------------------------------------------------------------------
+; Country info table (34 bytes, US defaults)
+; Returned by INT 21h AH=38h (Get Country Info)
+; ---------------------------------------------------------------------------
+country_info:
+    dw      0                       ; +00h: Date format (0=USA m/d/y)
+    db      '$', 0, 0, 0, 0        ; +02h: Currency symbol (ASCIIZ, 5 bytes)
+    db      ',', 0                  ; +07h: Thousands separator (ASCIIZ, 2 bytes)
+    db      '.', 0                  ; +09h: Decimal separator (ASCIIZ, 2 bytes)
+    db      '-', 0                  ; +0Bh: Date separator (ASCIIZ, 2 bytes)
+    db      ':', 0                  ; +0Dh: Time separator (ASCIIZ, 2 bytes)
+    db      0                       ; +0Fh: Currency format (0=symbol precedes, no space)
+    db      2                       ; +10h: Currency decimal digits
+    db      0                       ; +11h: Time format (0=12-hour)
+    dd      0                       ; +12h: Case-map FAR pointer (patched at copy time)
+    db      ',', 0                  ; +16h: Data-list separator (ASCIIZ, 2 bytes)
+    times 10 db 0                   ; +18h: Reserved (10 bytes)
+
+current_country dw  1               ; Current country code (1=US)
+
+; ---------------------------------------------------------------------------
 ; EXEC workspace (saved parent state)
 ; ---------------------------------------------------------------------------
 exec_parent_ss      dw  0           ; Parent SS during EXEC

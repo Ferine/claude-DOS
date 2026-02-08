@@ -328,7 +328,7 @@ int21_table:
     dw      int21_35            ; 35h - Get interrupt vector
     dw      int21_36            ; 36h - Get disk free space
     dw      0                   ; 37h - Reserved
-    dw      0                   ; 38h - Get/Set country info
+    dw      int21_38            ; 38h - Get/Set country info
     dw      int21_39            ; 39h - Create directory
     dw      int21_3A            ; 3Ah - Remove directory
     dw      int21_3B            ; 3Bh - Change directory
