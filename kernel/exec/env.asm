@@ -20,6 +20,7 @@ default_env:
     db  'PATH=A:\;C:\', 0
     db  'COMSPEC=A:\COMMAND.COM', 0
     db  'PROMPT=$P$G', 0
+    db  'BLASTER=A220 I5 D1 T3', 0
     db  0                       ; End of environment
 
 ; ---------------------------------------------------------------------------
