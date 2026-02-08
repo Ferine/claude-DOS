@@ -306,7 +306,7 @@ sb_reset_dsp:
     out     dx, al
 
     ; Wait for DSP ready (read 0xAA from read port)
-    ; Poll read-status port for up to ~100ms
+    ; Poll read-status port with limited total attempts
     mov     cx, 0xFFFF
 .reset_poll:
     mov     dx, [cs:sb_base_port]
@@ -324,8 +324,10 @@ sb_reset_dsp:
     cmp     al, 0xAA                ; DSP ready signature
     je      .reset_ok
 
-    ; Might need to retry read
-    mov     cx, 0x0FFF
+    ; Not ready yet - keep polling with remaining CX count
+    ; (don't reset CX, so the outer loop will eventually timeout)
+    test    cx, cx
+    jz      .reset_fail
     jmp     .reset_poll
 
 .reset_ok:
