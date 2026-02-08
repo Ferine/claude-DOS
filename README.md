@@ -1,18 +1,31 @@
 # ClaudeDOS
 
-A DOS-compatible operating system written entirely in x86 real-mode assembly (NASM). Built from scratch — bootloader, kernel, FAT12/FAT16 filesystem, memory manager, XMS driver, COMMAND.COM shell — all the way up to running the original 1996 Quake.
+A DOS-compatible operating system written entirely in x86 real-mode assembly (NASM). Built from scratch — bootloader, kernel, FAT12/FAT16 filesystem, memory manager, XMS driver, COMMAND.COM shell — all the way up to running the original 1996 Quake and Duke Nukem 3D.
+
+![Duke Nukem 3D running on ClaudeDOS](docs/screenshots/duke3d.png)
+
+## It Runs Quake and Duke Nukem 3D
+
+ClaudeDOS implements enough of the DOS API, DPMI infrastructure, and XMS memory management to run id Software's Quake (via DJGPP go32 + CWSDPMI) and 3D Realms' Duke Nukem 3D (via DOS4GW):
 
 ![Quake running on ClaudeDOS](docs/screenshots/quake.png)
-
-## It Runs Quake
-
-ClaudeDOS implements enough of the DOS API, DPMI infrastructure, and XMS memory management to run id Software's Quake via DJGPP's go32 extender and CWSDPMI:
 
 ```
 make run-quake     # Boot from floppy, Quake on 32MB hard disk
 ```
 
 At the `A:\>` prompt, type `C:` then `QUAKE`. The go32 stub auto-loads CWSDPMI as a TSR, enters 32-bit protected mode, and launches the game.
+
+Duke Nukem 3D uses the DOS4GW extender, which provides its own DPMI host when none is detected:
+
+```bash
+./scripts/run_app.sh tests/DUKE3D -n   # Build Duke3D HD image
+# Launch with Adlib + SB16 (required for FM chip detection):
+qemu-system-i386 -fda images/floppy.img -hda images/duke3d_hd.img \
+    -boot a -m 32 -audiodev coreaudio,id=audio0 \
+    -machine pcspk-audiodev=audio0 \
+    -device adlib,audiodev=audio0 -device sb16,audiodev=audio0,irq=7
+```
 
 ## Quick Start
 
@@ -146,6 +159,8 @@ docs/                 Error code reference, screenshots
 The boot sequence: BIOS loads the VBR from the floppy's boot sector. The VBR loads stage2, which finds IO.SYS in the root directory, loads it, and jumps to the kernel entry point. The kernel initializes memory (MCB chain), installs interrupt handlers (INT 20h-2Fh, INT 33h), sets up the SFT and DPB structures, detects the hard disk, initializes the XMS driver, and finally loads COMMAND.COM.
 
 When you type `QUAKE` at the prompt, COMMAND.COM searches PATH, finds QUAKE.EXE on C:, and calls INT 21h AH=4Bh (EXEC). The EXE loader reads the MZ header, loads the image cluster-by-cluster across segment boundaries, applies relocations, and jumps to the entry point. The go32 stub inside quake.exe checks for DPMI (INT 2Fh AX=1687h), doesn't find it, so it EXECs CWSDPMI.EXE which installs as a TSR (INT 21h AH=31h) hooking INT 2Fh and INT 31h. The go32 stub detects DPMI is now available, enters 32-bit protected mode, reopens quake.exe to read the COFF payload via DOS file I/O, allocates extended memory through DPMI, and launches the Quake engine.
+
+Duke Nukem 3D follows a similar path but uses the DOS4GW extender bound into the executable. AUTOEXEC.BAT chains to DUKE3D.BAT which changes to the game directory and runs DUKE3D.EXE. DOS4GW detects no DPMI host, provides its own, enters protected mode, and launches the Build engine. The Apogee Sound System initializes Sound Blaster and OPL2 FM synthesis for audio.
 
 ## Built With
 
