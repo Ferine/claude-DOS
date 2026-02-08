@@ -1,7 +1,7 @@
 # ClaudeDOS
 
 x86 real-mode DOS-compatible operating system written in NASM assembly.
-Runs Quake (DJGPP go32 + CWSDPMI).
+Runs Quake (DJGPP go32 + CWSDPMI) and Duke Nukem 3D (DOS4GW).
 
 ## Build Commands
 
@@ -35,6 +35,20 @@ make run-quake    # Builds floppy + quake HD, launches QEMU with 32MB RAM
                   # At prompt: C:  then  QUAKE
 ```
 The go32 stub auto-detects DPMI, loads CWSDPMI.EXE as TSR, enters protected mode.
+
+### Duke Nukem 3D Test
+
+Requires `tests/DUKE3D/` with `DUKE3D/DUKE3D.EXE`, `DUKE3D/DUKE3D.GRP`, `DUKE3D/DUKE3D.CFG`, `DUKE3D.BAT`.
+```
+./scripts/run_app.sh tests/DUKE3D -n    # Build HD image only
+qemu-system-i386 -fda images/floppy.img -hda images/duke3d_hd.img \
+    -boot a -m 32 -display cocoa \
+    -audiodev coreaudio,id=audio0 -machine pcspk-audiodev=audio0 \
+    -device adlib,audiodev=audio0 -device sb16,audiodev=audio0,irq=7
+```
+AUTOEXEC.BAT runs `C:` then `DUKE3D` which chains to `DUKE3D.BAT` (`cd \DUKE3D`, `DUKE3D`).
+DOS4GW provides its own DPMI host. The standalone `-device adlib` is required for OPL2 FM
+chip detection (QEMU's SB16 integrated OPL3 timer emulation fails the Apogee Sound System probe).
 
 ## Diagnostics
 
