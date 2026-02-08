@@ -106,6 +106,11 @@ batch_execute:
     cmp     byte [si], 0
     je      .next_line
 
+    ; Check for drive change (e.g., "C:")
+    call    try_drive_change
+    test    al, al
+    jnz     .next_line
+
     call    try_internal_cmd
     test    al, al
     jnz     .next_line
