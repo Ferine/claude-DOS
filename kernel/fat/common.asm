@@ -1169,6 +1169,8 @@ resolve_path:
     ; SI = remaining path
 
     ; Count path components to find the last one (which is the filename)
+    ; Save AX - the counting loop's lodsb clobbers AL
+    push    ax
     push    si
     xor     cx, cx              ; Component count
     mov     di, si
@@ -1186,6 +1188,7 @@ resolve_path:
     jmp     .count_loop
 .count_done:
     pop     si
+    pop     ax
 
     ; If no backslashes, entire path is the filename
     test    cx, cx

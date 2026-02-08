@@ -9,3 +9,5 @@ tests/target/
 /tests/doom
 /tests/Quake
 /tests/Windows 3.11 SGVM
+/tests/win311_tmp
+/tests/win311
