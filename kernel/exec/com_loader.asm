@@ -18,8 +18,9 @@ load_com:
 
     mov     [.load_seg], ax
 
-    ; Find file in root directory
-    call    fat_find_in_root
+    ; Find file in resolved directory (exec_dir_cluster set by caller)
+    mov     ax, [exec_dir_cluster]
+    call    fat_find_in_directory
     jc      .not_found
 
     ; DI = directory entry in disk_buffer
