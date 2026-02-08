@@ -186,7 +186,7 @@ if [ "$NO_RUN" -eq 1 ]; then
 fi
 
 # Audio config for macOS
-AUDIO_OPTS="-audiodev coreaudio,id=audio0 -machine pcspk-audiodev=audio0"
+AUDIO_OPTS="-audiodev coreaudio,id=audio0 -machine pcspk-audiodev=audio0 -device sb16,audiodev=audio0"
 
 # Launch QEMU
 echo "Launching QEMU (${MEM}MB RAM)..."
