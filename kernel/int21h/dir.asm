@@ -993,6 +993,7 @@ int21_4E:
     ; search_dir_sector will be computed from cluster
     ; search_dir_index = 0
     mov     word [search_dir_index], 0
+    mov     byte [ff_resume_flag], 0    ; FindFirst: compute LBA from cluster
     ; Fall through to search loop
     jmp     ff_search_loop
 
@@ -1042,6 +1043,7 @@ int21_4F:
     ; AL already = 0 for A:, 3 for D: etc.
 .fn_set_drive:
     call    fat_set_active_drive
+    mov     byte [ff_resume_flag], 1    ; FindNext: use saved sector from DTA
 
 ff_search_loop:
     ; Check if searching root or subdirectory
@@ -1068,7 +1070,11 @@ ff_search_loop:
     cmp     ax, [fat_eoc_min]       ; End of chain?
     jae     .ff_no_more
 
-    ; Convert cluster to first sector
+    ; Check if resuming FindNext (sector already valid from DTA)
+    cmp     byte [ff_resume_flag], 1
+    je      .ff_resume_subdir
+
+    ; FindFirst / cluster advance: convert cluster to first sector
     call    fat_cluster_to_lba
     jc      .ff_error
     mov     [search_dir_sector], ax ; Save first LBA of cluster
@@ -1080,6 +1086,24 @@ ff_search_loop:
     inc     ax
     mov     [ff_sub_secs], ax
     pop     bx
+    jmp     .ff_sub_next_sec
+
+.ff_resume_subdir:
+    ; FindNext: search_dir_sector already correct from DTA, compute remaining
+    mov     byte [ff_resume_flag], 0
+    ; AX still = search_dir_cluster (from above)
+    call    fat_cluster_to_lba      ; AX = first LBA of cluster
+    jc      .ff_error
+    mov     dx, [search_dir_sector]
+    sub     dx, ax                  ; DX = sector offset within cluster
+    push    bx
+    mov     bx, [active_dpb]
+    xor     ah, ah
+    mov     al, [bx + DPB_SEC_PER_CLUS]
+    inc     ax                      ; AX = total sectors per cluster
+    pop     bx
+    sub     ax, dx                  ; AX = remaining sectors (incl. current)
+    mov     [ff_sub_secs], ax
 
 .ff_sub_next_sec:
     cmp     word [ff_sub_secs], 0
@@ -1276,6 +1300,7 @@ ff_search_loop:
 ; Local variables for FindFirst/FindNext
 ff_root_end     dw  33              ; Default: 19 + 14 = 33 for FAT12 floppy
 ff_sub_secs     dw  0              ; Sectors remaining in current cluster
+ff_resume_flag  db  0              ; 1 = FindNext resume (don't recompute LBA)
 
 ; ---------------------------------------------------------------------------
 ; ff_name_to_pattern - Convert ASCIIZ filespec to FCB pattern with wildcards
