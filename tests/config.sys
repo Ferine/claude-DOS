@@ -1,0 +1,11 @@
+REM === claudeDOS CONFIG.SYS edge-case test ===
+; This is a semicolon comment
+  REM Leading whitespace before REM
+
+FILES=30
+buffers=25
+LASTDRIVE=G
+device=TESTDRV.SYS
+DEVICE=TESTDRV2.SYS /test /params
+DOS=HIGH,UMB
+UNKNOWN=ignored
