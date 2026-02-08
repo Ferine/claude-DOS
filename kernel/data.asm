@@ -180,6 +180,12 @@ exec_init_sp        dw  0           ; .EXE initial SP
 exec_save_area      times 18 db 0   ; Saved parent register save area (9 words)
 exec_child_env      dw  0           ; Child environment segment (for cleanup)
 
+; Previous level exec parent state (for nested EXEC support, e.g. shell->quake->cwsdpmi)
+exec_parent_ss_prev dw  0
+exec_parent_sp_prev dw  0
+exec_parent_psp_prev dw 0
+exec_save_area_prev times 18 db 0   ; Previous saved register area (9 words)
+
 ; ---------------------------------------------------------------------------
 ; Current PSP segment
 ; ---------------------------------------------------------------------------

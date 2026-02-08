@@ -56,6 +56,29 @@ int21_4B:
     jmp     dos_set_error
 
 .do_exec:
+    ; Save previous exec parent state for nested EXEC support
+    ; (e.g. shell execs quake, quake execs cwsdpmi as TSR)
+    push    es
+    push    si
+    push    di
+    push    cx
+    push    cs
+    pop     es
+    mov     ax, [exec_parent_ss]
+    mov     [exec_parent_ss_prev], ax
+    mov     ax, [exec_parent_sp]
+    mov     [exec_parent_sp_prev], ax
+    mov     ax, [exec_parent_psp]
+    mov     [exec_parent_psp_prev], ax
+    mov     si, exec_save_area
+    mov     di, exec_save_area_prev
+    mov     cx, 9
+    rep     movsw
+    pop     cx
+    pop     di
+    pop     si
+    pop     es
+
     ; Save parent context
     mov     [exec_parent_ss], ss
     mov     [exec_parent_sp], sp
@@ -1108,6 +1131,19 @@ terminate_common:
     ; Restore parent's register save area
     mov     si, exec_save_area
     mov     di, save_ax
+    mov     cx, 9
+    rep     movsw
+
+    ; Restore previous exec parent state (for nested EXEC support)
+    ; This ensures the next termination will return to the grandparent
+    mov     ax, [exec_parent_ss_prev]
+    mov     [exec_parent_ss], ax
+    mov     ax, [exec_parent_sp_prev]
+    mov     [exec_parent_sp], ax
+    mov     ax, [exec_parent_psp_prev]
+    mov     [exec_parent_psp], ax
+    mov     si, exec_save_area_prev
+    mov     di, exec_save_area
     mov     cx, 9
     rep     movsw
 

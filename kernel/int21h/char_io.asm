@@ -6,14 +6,9 @@
 ; INT 21h AH=00h - Terminate Program
 ; ---------------------------------------------------------------------------
 int21_00:
-    ; Simple terminate - return to parent
-    ; Full implementation in process.asm (Phase 5)
-    mov     si, msg_terminate
-    call    bios_print_string
-    ; For now, just halt
-    cli
-    hlt
-    ret
+    ; Terminate program - same as AH=4Ch with return code 0
+    mov     byte [save_ax], 0   ; Return code = 0
+    jmp     int21_4C
 
 ; ---------------------------------------------------------------------------
 ; Redirection helpers - check if stdout/stdin is redirected to a file
@@ -1010,4 +1005,3 @@ speaker_beep:
     ret
 
 ; ---------------------------------------------------------------------------
-msg_terminate   db  'Program terminated.', 0x0D, 0x0A, 0
