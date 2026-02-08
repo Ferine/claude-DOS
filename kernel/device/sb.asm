@@ -234,10 +234,27 @@ sb_init:
     ; Step 4: Install IRQ handler
     call    sb_install_irq
 
-    ; Step 5: Turn speaker on by default
+    ; Step 5: Set mixer volumes to max (SB16 registers)
+    mov     ah, 0x30                ; Master volume left
+    mov     al, 0xF8                ; Max (top 5 bits)
+    call    sb_set_mixer
+    mov     ah, 0x31                ; Master volume right
+    mov     al, 0xF8
+    call    sb_set_mixer
+    mov     ah, 0x32                ; Voice volume left
+    mov     al, 0xF8
+    call    sb_set_mixer
+    mov     ah, 0x33                ; Voice volume right
+    mov     al, 0xF8
+    call    sb_set_mixer
+    mov     ah, 0x22                ; SBPro master volume (both channels)
+    mov     al, 0xFF
+    call    sb_set_mixer
+
+    ; Step 6: Turn speaker on by default
     call    sb_speaker_on
 
-    ; Step 6: Print detection message
+    ; Step 7: Print detection message
     mov     si, sb_msg_detected
     call    bios_print_string
 

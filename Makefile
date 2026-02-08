@@ -135,7 +135,7 @@ $(HD_IMG): $(UTIL_BINS) $(TEST_BINS) $(MKFLOPPY) | $(IMGDIR)
 
 # --- Run ---
 # Audio config for PC speaker on macOS
-AUDIO_OPTS := -audiodev coreaudio,id=audio0 -machine pcspk-audiodev=audio0
+AUDIO_OPTS := -audiodev coreaudio,id=audio0 -machine pcspk-audiodev=audio0 -device sb16,audiodev=audio0
 
 run: floppy
 	$(QEMU) -fda $(FLOPPY) -boot a -m 4 -display cocoa $(AUDIO_OPTS)
