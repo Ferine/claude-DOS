@@ -47,6 +47,9 @@ kernel_init:
     call    install_int23
     call    install_int24
 
+    ; Probe for Sound Blaster
+    call    sb_init
+
     ; Probe for hard disk (C: drive)
     call    init_hard_disk
 

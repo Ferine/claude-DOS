@@ -158,6 +158,18 @@ xms_handles:                        ; XMS handle table (16 handles)
     times XMS_MAX_HANDLES * XMS_HANDLE_SIZE db 0
 
 ; ---------------------------------------------------------------------------
+; Sound Blaster state
+; ---------------------------------------------------------------------------
+sb_present          db  0               ; 1 = Sound Blaster detected
+sb_base_port        dw  SB_BASE_PORT    ; I/O base address (0x220)
+sb_irq              db  SB_DEFAULT_IRQ  ; IRQ number (5)
+sb_dma_channel      db  SB_DEFAULT_DMA  ; 8-bit DMA channel (1)
+sb_dsp_version      dw  0               ; DSP version (major.minor)
+sb_old_irq_vector   dd  0               ; Saved old IRQ vector
+sb_dma_playing      db  0               ; 1 = DMA playback active
+sb_irq_fired        db  0               ; Set to 1 by IRQ handler (for polling)
+
+; ---------------------------------------------------------------------------
 ; EXEC workspace (saved parent state)
 ; ---------------------------------------------------------------------------
 exec_parent_ss      dw  0           ; Parent SS during EXEC

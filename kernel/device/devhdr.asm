@@ -5,7 +5,7 @@
 ; ---------------------------------------------------------------------------
 ; init_devices - Initialize the built-in device driver chain
 ; NUL is always the first device in the chain
-; Chain: NUL -> CON -> AUX -> PRN -> CLOCK$
+; Chain: NUL -> CON -> AUX -> PRN -> CLOCK$ -> RAMDISK -> SBSND$
 ; ---------------------------------------------------------------------------
 init_devices:
     push    es
@@ -35,9 +35,13 @@ init_devices:
     mov     word [clock_device + DEV_HDR.next_off], ramdisk_device
     mov     [clock_device + DEV_HDR.next_seg], cs
 
-    ; RAMDISK is last
-    mov     word [ramdisk_device + DEV_HDR.next_off], 0xFFFF
-    mov     word [ramdisk_device + DEV_HDR.next_seg], 0xFFFF
+    ; Link RAMDISK -> SBSND$
+    mov     word [ramdisk_device + DEV_HDR.next_off], sb_device
+    mov     [ramdisk_device + DEV_HDR.next_seg], cs
+
+    ; SBSND$ is last
+    mov     word [sb_device + DEV_HDR.next_off], 0xFFFF
+    mov     word [sb_device + DEV_HDR.next_seg], 0xFFFF
 
     pop     ax
     pop     es

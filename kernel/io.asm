@@ -125,6 +125,9 @@ kernel_entry:
 %include "device/clock.asm"
 %include "device/ramdisk.asm"
 
+; Sound Blaster driver
+%include "device/sb.asm"
+
 ; Mouse driver
 %include "mouse.asm"
 

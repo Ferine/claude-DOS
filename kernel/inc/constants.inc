@@ -250,6 +250,88 @@ BEEP_FREQUENCY      equ     880         ; Default beep frequency (Hz) - A5 note
 BEEP_DIVISOR        equ     1193182 / BEEP_FREQUENCY  ; Timer divisor for beep
 BEL_CHAR            equ     0x07        ; Bell character (Ctrl+G)
 
+; ---------------------------------------------------------------------------
+; Sound Blaster DSP ports (offsets from base port, default base = 0x220)
+; ---------------------------------------------------------------------------
+SB_BASE_PORT        equ     0x220       ; Default base I/O port
+SB_PORT_RESET       equ     0x06        ; DSP Reset (write)
+SB_PORT_READ        equ     0x0A        ; DSP Read Data (read)
+SB_PORT_WRITE       equ     0x0C        ; DSP Write Command/Data (write)
+SB_PORT_WRITE_STATUS equ    0x0C        ; DSP Write Status (read, bit 7)
+SB_PORT_READ_STATUS equ     0x0E        ; DSP Data Available (read, bit 7)
+SB_PORT_ACK_16      equ     0x0F        ; 16-bit DMA IRQ acknowledge (SB16)
+SB_PORT_MIXER_ADDR  equ     0x04        ; Mixer address port (SBPro+)
+SB_PORT_MIXER_DATA  equ     0x05        ; Mixer data port (SBPro+)
+
+; Sound Blaster DSP commands
+SB_CMD_DIRECT_DAC   equ     0x10        ; Direct 8-bit DAC output
+SB_CMD_DMA_8BIT     equ     0x14        ; Single-cycle 8-bit DMA output
+SB_CMD_DMA_ADPCM2   equ     0x16        ; 2-bit ADPCM DMA output
+SB_CMD_DMA_ADPCM2R  equ     0x17        ; 2-bit ADPCM DMA w/ reference
+SB_CMD_DMA_AUTO_8   equ     0x1C        ; Auto-initialize 8-bit DMA output
+SB_CMD_DMA_ADPCM8AI equ     0x1F        ; Auto-init ADPCM 8-bit
+SB_CMD_DIRECT_ADC   equ     0x20        ; Direct 8-bit ADC input
+SB_CMD_DMA_ADC_8    equ     0x24        ; Single-cycle 8-bit DMA input
+SB_CMD_DMA_AUTO_ADC equ     0x2C        ; Auto-initialize 8-bit DMA input
+SB_CMD_MIDI_POLL    equ     0x30        ; MIDI read (polling)
+SB_CMD_MIDI_INT     equ     0x31        ; MIDI read (interrupt)
+SB_CMD_TIME_CONST   equ     0x40        ; Set time constant
+SB_CMD_DMA_BLOCK_SZ equ     0x48        ; Set DMA block transfer size
+SB_CMD_DMA_HALT     equ     0xD0        ; Halt 8-bit DMA
+SB_CMD_SPEAKER_ON   equ     0xD1        ; Turn speaker on
+SB_CMD_SPEAKER_OFF  equ     0xD3        ; Turn speaker off
+SB_CMD_DMA_CONTINUE equ     0xD4        ; Continue 8-bit DMA
+SB_CMD_DMA_HALT_16  equ     0xD5        ; Halt 16-bit DMA (SB16)
+SB_CMD_DMA_CONT_16  equ     0xD6        ; Continue 16-bit DMA (SB16)
+SB_CMD_DSP_VERSION  equ     0xE1        ; Get DSP version
+
+; DMA controller ports (8-bit channels 0-3, 8237A)
+DMA_ADDR_CH0        equ     0x00        ; Channel 0 base address
+DMA_COUNT_CH0       equ     0x01        ; Channel 0 base count
+DMA_ADDR_CH1        equ     0x02        ; Channel 1 base address
+DMA_COUNT_CH1       equ     0x03        ; Channel 1 base count
+DMA_ADDR_CH2        equ     0x04        ; Channel 2 base address
+DMA_COUNT_CH2       equ     0x05        ; Channel 2 base count
+DMA_ADDR_CH3        equ     0x06        ; Channel 3 base address
+DMA_COUNT_CH3       equ     0x07        ; Channel 3 base count
+DMA_STATUS          equ     0x08        ; Status register (read)
+DMA_COMMAND         equ     0x08        ; Command register (write)
+DMA_REQUEST         equ     0x09        ; Request register
+DMA_SINGLE_MASK     equ     0x0A        ; Single channel mask register
+DMA_MODE            equ     0x0B        ; Mode register
+DMA_FLIPFLOP_RESET  equ     0x0C        ; Byte pointer flip-flop reset
+DMA_MASTER_RESET    equ     0x0D        ; Master reset
+
+; DMA page registers
+DMA_PAGE_CH0        equ     0x87        ; Channel 0 page register
+DMA_PAGE_CH1        equ     0x83        ; Channel 1 page register
+DMA_PAGE_CH2        equ     0x81        ; Channel 2 page register
+DMA_PAGE_CH3        equ     0x82        ; Channel 3 page register
+
+; DMA mode register bits
+DMA_MODE_SINGLE     equ     0x40        ; Single transfer mode
+DMA_MODE_BLOCK      equ     0x80        ; Block transfer mode
+DMA_MODE_AUTO_INIT  equ     0x10        ; Auto-initialize
+DMA_MODE_WRITE      equ     0x04        ; Write transfer (memory -> device)
+DMA_MODE_READ       equ     0x08        ; Read transfer (device -> memory)
+
+; Sound Blaster defaults
+SB_DEFAULT_IRQ      equ     5           ; Default IRQ
+SB_DEFAULT_DMA      equ     1           ; Default 8-bit DMA channel
+SB_INT_VECTOR       equ     0x0D        ; IRQ 5 -> INT 0Dh
+SB_INT_VECTOR_ADDR  equ     SB_INT_VECTOR * 4  ; IVT offset (0x34)
+SB_IRQ_MASK         equ     0x20        ; IRQ 5 = bit 5 on master PIC
+
+; Sound Blaster mixer registers (SBPro+)
+SB_MIX_MASTER_VOL   equ     0x22        ; Master volume (L/R nibbles)
+SB_MIX_VOICE_VOL    equ     0x04        ; Voice/DAC volume
+SB_MIX_FM_VOL       equ     0x26        ; FM volume
+SB_MIX_CD_VOL       equ     0x28        ; CD volume
+SB_MIX_LINE_VOL     equ     0x2E        ; Line-in volume
+SB_MIX_IRQ_SETUP    equ     0x80        ; IRQ setup register (SB16)
+SB_MIX_DMA_SETUP    equ     0x81        ; DMA setup register (SB16)
+SB_MIX_IRQ_STATUS   equ     0x82        ; IRQ status (SB16)
+
 ; DPMI Error Codes
 DPMI_ERR_UNSUPPORTED    equ     0x8001
 DPMI_ERR_NO_DESCRIPTORS equ     0x8011
