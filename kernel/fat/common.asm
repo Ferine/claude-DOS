@@ -974,7 +974,50 @@ parse_path_component:
     rep     stosb
     pop     di
 
+    ; Special-case "." and ".." entries (dots are part of name, not separator)
+    cmp     byte [si], '.'
+    jne     .name_loop_start
+    cmp     byte [si + 1], '.'
+    je      .check_dotdot_entry
+    ; Check for "." followed by end-of-component
+    mov     al, [si + 1]
+    test    al, al
+    jz      .dot_entry
+    cmp     al, '\'
+    je      .dot_entry
+    cmp     al, '/'
+    je      .dot_entry
+    jmp     .name_loop_start
+.check_dotdot_entry:
+    ; Check for ".." followed by end-of-component
+    mov     al, [si + 2]
+    test    al, al
+    jz      .dotdot_entry
+    cmp     al, '\'
+    je      .dotdot_entry
+    cmp     al, '/'
+    je      .dotdot_entry
+    jmp     .name_loop_start
+.dot_entry:
+    mov     byte [di], '.'
+    inc     si                      ; Skip past "."
+    ; If separator, skip it too
+    cmp     byte [si], 0
+    je      .check_empty
+    inc     si                      ; Skip separator
+    jmp     .check_empty
+.dotdot_entry:
+    mov     byte [di], '.'
+    mov     byte [di + 1], '.'
+    add     si, 2                   ; Skip past ".."
+    ; If separator, skip it too
+    cmp     byte [si], 0
+    je      .check_empty
+    inc     si                      ; Skip separator
+    jmp     .check_empty
+
     ; Copy name part (up to 8 chars or until . or \ or / or NUL)
+.name_loop_start:
     mov     cx, 8
 .name_loop:
     lodsb

@@ -743,6 +743,30 @@ int21_3B:
     jc      .cd_not_found
 
     ; AX = parent directory cluster, fcb_name_buffer = directory name
+    ; Check for special "." entry - target is current directory
+    cmp     byte [fcb_name_buffer], '.'
+    jne     .cd_normal_lookup
+    cmp     byte [fcb_name_buffer + 1], ' '
+    jne     .cd_check_dotdot_lookup
+    ; "." - AX is already the target (current directory)
+    jmp     .cd_update_state
+
+.cd_check_dotdot_lookup:
+    cmp     byte [fcb_name_buffer + 1], '.'
+    jne     .cd_normal_lookup
+    cmp     byte [fcb_name_buffer + 2], ' '
+    jne     .cd_normal_lookup
+    ; ".." - navigate to parent directory
+    test    ax, ax
+    jz      .cd_update_state        ; At root, ".." stays at root (AX=0)
+    ; Look up ".." entry in current directory to get parent cluster
+    mov     si, fcb_name_buffer
+    call    fat_find_in_directory
+    jc      .cd_not_found
+    mov     ax, [di + 26]           ; Parent cluster from ".." entry
+    jmp     .cd_update_state
+
+.cd_normal_lookup:
     ; Search for the directory in its parent
     push    ax                      ; Save parent cluster
     mov     si, fcb_name_buffer
@@ -768,7 +792,66 @@ int21_3B:
     ; Same drive - update globals
     mov     [current_dir_cluster], ax
 
-    ; Update current_dir_path (strip drive letter and leading \)
+    ; Build canonical current_dir_path based on target
+    ; If target is root, clear path
+    test    ax, ax
+    jz      .cd_set_root_path
+
+    ; Check if input was ".." (relative parent navigation)
+    mov     si, path_buffer
+    cmp     byte [si + 1], ':'
+    jne     .cd_no_drv_check
+    add     si, 2
+.cd_no_drv_check:
+    cmp     byte [si], '.'
+    jne     .cd_check_absolute
+    cmp     byte [si + 1], '.'
+    jne     .cd_check_dot_only
+    cmp     byte [si + 2], 0
+    je      .cd_dotdot_path
+    cmp     byte [si + 2], '\'
+    je      .cd_dotdot_path
+    jmp     .cd_check_absolute
+
+.cd_check_dot_only:
+    cmp     byte [si + 1], 0
+    je      .cd_path_done           ; "." - no path change needed
+    cmp     byte [si + 1], '\'
+    je      .cd_path_done           ; ".\" - no path change needed
+    jmp     .cd_check_absolute
+
+.cd_dotdot_path:
+    ; Strip last component from current_dir_path
+    mov     si, current_dir_path
+    ; Find end of string
+    mov     di, si
+.cd_find_pathend:
+    cmp     byte [di], 0
+    je      .cd_got_pathend
+    inc     di
+    jmp     .cd_find_pathend
+.cd_got_pathend:
+    ; DI = end of string; scan backwards for '\'
+    cmp     di, si
+    je      .cd_path_done           ; Already empty
+.cd_scan_back:
+    dec     di
+    cmp     byte [di], '\'
+    je      .cd_truncate_at_sep
+    cmp     di, si
+    jne     .cd_scan_back
+    ; No separator found - going to root from single-level subdir
+    jmp     .cd_set_root_path
+.cd_truncate_at_sep:
+    mov     byte [di], 0            ; Truncate at separator
+    jmp     .cd_path_done
+
+.cd_set_root_path:
+    mov     byte [current_dir_path], 0
+    jmp     .cd_path_done
+
+.cd_check_absolute:
+    ; Reset SI to path_buffer for absolute/relative copy
     mov     si, path_buffer
     cmp     byte [si + 1], ':'
     jne     .cd_strip
