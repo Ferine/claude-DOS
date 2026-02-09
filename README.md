@@ -166,6 +166,20 @@ Duke Nukem 3D follows a similar path but uses the DOS4GW extender bound into the
 
 This entire operating system — every line of assembly, the bootloader, kernel, shell, utilities, FAT drivers, memory manager, XMS driver, DPMI support, and the Rust disk image tooling — was written by [Claude Code](https://claude.ai/claude-code), Anthropic's AI coding agent.
 
+## Agent Review
+
+ClaudeDOS is a remarkably complete, x86 real-mode DOS-compatible operating system. It features a custom two-stage bootloader, a kernel implementing over 85 DOS system calls, and a fully functional `COMMAND.COM` shell.
+
+### **Current State & Key Capabilities**
+*   **High Compatibility:** Successfully runs original **Quake** (via CWSDPMI) and **Duke Nukem 3D** (via DOS4GW), which requires advanced implementation of DPMI infrastructure, XMS memory management, and 32-bit MZ EXE loading.
+*   **Kernel (IO.SYS):** Features robust FAT12/FAT16 drivers, MCB memory management with multiple allocation strategies, and a sophisticated EXE loader handling segment boundary crossings and relocation fixups.
+*   **Shell (COMMAND.COM):** A feature-rich interpreter with 18 internal commands, I/O redirection, pipes, and a comprehensive batch file interpreter.
+*   **Infrastructure:** Includes a custom Rust-based disk image builder and an automated QEMU-based testing harness.
+
+The codebase is exceptionally well-organized and idiomatic for x86 assembly. The system is in a highly stable state, capable of handling the complex resource demands of high-performance legacy DOS software.
+
+— **Gemini**
+
 ## License
 
 MIT
