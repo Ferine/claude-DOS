@@ -343,9 +343,9 @@ xms_move_emb:
     adc     dx, 0                   ; Carry into high word
 
 .src_done:
-    ; Store source linear address (24-bit)
+    ; Store source linear address (32-bit)
     mov     [cs:xms_move_src_lo], ax
-    mov     [cs:xms_move_src_hi], dl
+    mov     [cs:xms_move_src_hi], dx
 
     ; Reload structure pointer
     mov     ds, [cs:xms_move_struct_seg]
@@ -378,9 +378,9 @@ xms_move_emb:
     adc     dx, 0
 
 .dst_done:
-    ; Store dest linear address (24-bit)
+    ; Store dest linear address (32-bit)
     mov     [cs:xms_move_dst_lo], ax
-    mov     [cs:xms_move_dst_hi], dl
+    mov     [cs:xms_move_dst_hi], dx
 
     ; === Chunked move loop: up to 64KB per INT 15h AH=87h call ===
 .move_loop:
@@ -419,21 +419,23 @@ xms_move_emb:
     pop     cx
     pop     di
 
-    ; Source descriptor at GDT+10h
+    ; Source descriptor at GDT+10h (8-byte segment descriptor)
     mov     word [es:di + 10h], 0xFFFF    ; Limit = 64KB
     mov     ax, [cs:xms_move_src_lo]
-    mov     [es:di + 12h], ax             ; Base low word
-    mov     al, [cs:xms_move_src_hi]
-    mov     [es:di + 14h], al             ; Base high byte
+    mov     [es:di + 12h], ax             ; Base bits 0-15
+    mov     ax, [cs:xms_move_src_hi]
+    mov     [es:di + 14h], al             ; Base bits 16-23
     mov     byte [es:di + 15h], 93h       ; Access: present, data, writable
+    mov     [es:di + 17h], ah             ; Base bits 24-31
 
-    ; Dest descriptor at GDT+18h
+    ; Dest descriptor at GDT+18h (8-byte segment descriptor)
     mov     word [es:di + 18h], 0xFFFF    ; Limit = 64KB
     mov     ax, [cs:xms_move_dst_lo]
-    mov     [es:di + 1Ah], ax             ; Base low word
-    mov     al, [cs:xms_move_dst_hi]
-    mov     [es:di + 1Ch], al             ; Base high byte
+    mov     [es:di + 1Ah], ax             ; Base bits 0-15
+    mov     ax, [cs:xms_move_dst_hi]
+    mov     [es:di + 1Ch], al             ; Base bits 16-23
     mov     byte [es:di + 1Dh], 93h       ; Access: present, data, writable
+    mov     [es:di + 1Fh], ah             ; Base bits 24-31
 
     ; Call INT 15h AH=87h: ES:SI = GDT, CX = word count
     mov     si, xms_gdt
@@ -451,17 +453,17 @@ xms_move_emb:
 
     ; Partial chunk: advance by CX bytes
     add     [cs:xms_move_src_lo], cx
-    adc     byte [cs:xms_move_src_hi], 0
+    adc     word [cs:xms_move_src_hi], 0
     add     [cs:xms_move_dst_lo], cx
-    adc     byte [cs:xms_move_dst_hi], 0
+    adc     word [cs:xms_move_dst_hi], 0
     sub     [cs:xms_move_remain_lo], cx
     sbb     word [cs:xms_move_remain_hi], 0
     jmp     .move_loop
 
 .advance_64k:
     ; Full 64KB chunk: advance addresses by 0x10000
-    inc     byte [cs:xms_move_src_hi]
-    inc     byte [cs:xms_move_dst_hi]
+    inc     word [cs:xms_move_src_hi]
+    inc     word [cs:xms_move_dst_hi]
     sub     word [cs:xms_move_remain_lo], 0
     sbb     word [cs:xms_move_remain_hi], 1
     jmp     .move_loop
@@ -835,10 +837,10 @@ XMS_HANDLE_SIZE     equ     6       ; 2 bytes size + 4 bytes address
 ; ---------------------------------------------------------------------------
 xms_move_struct_off dw  0           ; Saved pointer to move structure
 xms_move_struct_seg dw  0
-xms_move_src_lo     dw  0           ; Source linear address (low word)
-xms_move_src_hi     db  0           ; Source linear address (high byte)
-xms_move_dst_lo     dw  0           ; Dest linear address (low word)
-xms_move_dst_hi     db  0           ; Dest linear address (high byte)
+xms_move_src_lo     dw  0           ; Source linear address (bits 0-15)
+xms_move_src_hi     dw  0           ; Source linear address (bits 16-31)
+xms_move_dst_lo     dw  0           ; Dest linear address (bits 0-15)
+xms_move_dst_hi     dw  0           ; Dest linear address (bits 16-31)
 xms_move_remain_lo  dw  0           ; Remaining bytes to copy (low word)
 xms_move_remain_hi  dw  0           ; Remaining bytes to copy (high word)
 xms_move_chunk_words dw 0           ; Word count for current chunk
