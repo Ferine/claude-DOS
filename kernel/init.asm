@@ -47,6 +47,14 @@ kernel_init:
     call    install_int23
     call    install_int24
 
+    ; Install INT 28h (DOS Idle), INT 29h (Fast Console Output)
+    call    install_int28
+    call    install_int29
+
+    ; Install INT 25h/26h (Absolute Disk Read/Write)
+    call    install_int25
+    call    install_int26
+
     ; Probe for Sound Blaster (disabled - causes hang when no hardware present)
     ; call    sb_init
 
@@ -349,11 +357,352 @@ int23_handler:
     iret
 
 ; ---------------------------------------------------------------------------
-; INT 24h handler - Critical Error (default: fail the operation)
+; INT 24h handler - Critical Error ("Abort, Retry, Fail?" prompt)
+; On entry: AH = error info, AL = drive number, DI = BIOS error code
+; On return: AL = action (0=ignore, 1=retry, 2=abort, 3=fail)
 ; ---------------------------------------------------------------------------
 int24_handler:
-    mov     al, 3               ; Action: FAIL
+    push    bx
+    push    cx
+    push    dx
+    push    si
+
+    ; Print error message
+    push    ax
+    push    ax
+    ; Print drive letter
+    mov     si, .msg_drive
+    call    .print_str
+    pop     ax
+    add     al, 'A'
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    ; Print error type
+    pop     ax
+    test    ah, 1
+    jnz     .write_err
+    mov     si, .msg_read
+    jmp     .print_err_type
+.write_err:
+    mov     si, .msg_write
+.print_err_type:
+    call    .print_str
+    mov     si, .msg_prompt
+    call    .print_str
+
+.get_key:
+    xor     ah, ah
+    int     0x16
+    ; Convert to uppercase
+    cmp     al, 'a'
+    jb      .check_key
+    cmp     al, 'z'
+    ja      .check_key
+    sub     al, 0x20
+.check_key:
+    cmp     al, 'A'
+    je      .do_abort
+    cmp     al, 'R'
+    je      .do_retry
+    cmp     al, 'F'
+    je      .do_fail
+    jmp     .get_key
+
+.do_abort:
+    mov     al, 'A'
+    call    .echo_crlf
+    pop     si
+    pop     dx
+    pop     cx
+    pop     bx
+    mov     al, 2               ; Abort
     iret
+.do_retry:
+    mov     al, 'R'
+    call    .echo_crlf
+    pop     si
+    pop     dx
+    pop     cx
+    pop     bx
+    mov     al, 1               ; Retry
+    iret
+.do_fail:
+    mov     al, 'F'
+    call    .echo_crlf
+    pop     si
+    pop     dx
+    pop     cx
+    pop     bx
+    mov     al, 3               ; Fail
+    iret
+
+.echo_crlf:
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    mov     al, 0x0D
+    int     0x10
+    mov     al, 0x0A
+    int     0x10
+    ret
+
+.print_str:
+    lodsb
+    test    al, al
+    jz      .print_done
+    mov     ah, 0x0E
+    xor     bx, bx
+    int     0x10
+    jmp     .print_str
+.print_done:
+    ret
+
+.msg_drive  db  0x0D, 0x0A, 'Drive ', 0
+.msg_read   db  ' read error', 0
+.msg_write  db  ' write error', 0
+.msg_prompt db  0x0D, 0x0A, 'Abort, Retry, Fail? ', 0
+
+; ---------------------------------------------------------------------------
+; install_int28 - Install INT 28h (DOS Idle)
+; ---------------------------------------------------------------------------
+install_int28:
+    push    es
+    push    ax
+    xor     ax, ax
+    mov     es, ax
+    ; INT 28h vector at 0000:00A0 (28h * 4)
+    mov     word [es:0x00A0], int28_handler
+    mov     [es:0x00A2], cs
+    pop     ax
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; INT 28h handler - DOS Idle (default: just return, TSRs can hook this)
+; ---------------------------------------------------------------------------
+int28_handler:
+    iret
+
+; ---------------------------------------------------------------------------
+; install_int29 - Install INT 29h (Fast Console Output)
+; ---------------------------------------------------------------------------
+install_int29:
+    push    es
+    push    ax
+    xor     ax, ax
+    mov     es, ax
+    ; INT 29h vector at 0000:00A4 (29h * 4)
+    mov     word [es:0x00A4], int29_handler
+    mov     [es:0x00A6], cs
+    pop     ax
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; INT 29h handler - Fast Console Output
+; Input: AL = character to output
+; ---------------------------------------------------------------------------
+int29_handler:
+    push    ax
+    push    bx
+    mov     ah, 0x0E            ; BIOS teletype output
+    xor     bx, bx              ; Page 0
+    int     0x10
+    pop     bx
+    pop     ax
+    iret
+
+; ---------------------------------------------------------------------------
+; install_int25 - Install INT 25h (Absolute Disk Read)
+; ---------------------------------------------------------------------------
+install_int25:
+    push    es
+    push    ax
+    xor     ax, ax
+    mov     es, ax
+    ; INT 25h vector at 0000:0094 (25h * 4)
+    mov     word [es:0x0094], int25_handler
+    mov     [es:0x0096], cs
+    pop     ax
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; install_int26 - Install INT 26h (Absolute Disk Write)
+; ---------------------------------------------------------------------------
+install_int26:
+    push    es
+    push    ax
+    xor     ax, ax
+    mov     es, ax
+    ; INT 26h vector at 0000:0098 (26h * 4)
+    mov     word [es:0x0098], int26_handler
+    mov     [es:0x009A], cs
+    pop     ax
+    pop     es
+    ret
+
+; ---------------------------------------------------------------------------
+; INT 25h handler - Absolute Disk Read
+; Input: AL = drive (0=A, 1=B, 2=C), CX = sector count,
+;        DX = starting logical sector, DS:BX = buffer
+; Output: CF=0 success, CF=1 error (AX=error code)
+; Note: Leaves original flags on stack (caller must pop)
+; ---------------------------------------------------------------------------
+int25_handler:
+    pushf                       ; Save flags (will become the "extra" flags word)
+    push    si
+    push    di
+    push    bp
+
+    mov     [cs:abs_io_drive], al
+    mov     [cs:abs_io_count], cx
+    mov     [cs:abs_io_start], dx
+    mov     [cs:abs_io_buf_off], bx
+    mov     [cs:abs_io_buf_seg], ds
+
+    call    abs_disk_setup
+    jc      .read_err
+
+.read_loop:
+    cmp     word [cs:abs_io_count], 0
+    je      .read_done
+
+    mov     ax, [cs:abs_io_start]
+    call    abs_lba_to_chs
+    mov     dl, [cs:abs_io_bios_drv]
+    push    ds
+    mov     ds, [cs:abs_io_buf_seg]
+    mov     bx, [cs:abs_io_buf_off]
+    mov     ax, 0x0201
+    int     0x13
+    pop     ds
+    jc      .read_err
+
+    inc     word [cs:abs_io_start]
+    add     word [cs:abs_io_buf_off], 512
+    dec     word [cs:abs_io_count]
+    jmp     .read_loop
+
+.read_done:
+    pop     bp
+    pop     di
+    pop     si
+    popf
+    clc
+    retf
+
+.read_err:
+    mov     ax, 0x0408
+    pop     bp
+    pop     di
+    pop     si
+    popf
+    stc
+    retf
+
+; ---------------------------------------------------------------------------
+; INT 26h handler - Absolute Disk Write
+; Same calling convention as INT 25h but writes instead of reads
+; ---------------------------------------------------------------------------
+int26_handler:
+    pushf
+    push    si
+    push    di
+    push    bp
+
+    mov     [cs:abs_io_drive], al
+    mov     [cs:abs_io_count], cx
+    mov     [cs:abs_io_start], dx
+    mov     [cs:abs_io_buf_off], bx
+    mov     [cs:abs_io_buf_seg], ds
+
+    call    abs_disk_setup
+    jc      .write_err
+
+.write_loop:
+    cmp     word [cs:abs_io_count], 0
+    je      .write_done
+
+    mov     ax, [cs:abs_io_start]
+    call    abs_lba_to_chs
+    mov     dl, [cs:abs_io_bios_drv]
+    push    ds
+    mov     ds, [cs:abs_io_buf_seg]
+    mov     bx, [cs:abs_io_buf_off]
+    mov     ax, 0x0301          ; Write 1 sector
+    int     0x13
+    pop     ds
+    jc      .write_err
+
+    inc     word [cs:abs_io_start]
+    add     word [cs:abs_io_buf_off], 512
+    dec     word [cs:abs_io_count]
+    jmp     .write_loop
+
+.write_done:
+    pop     bp
+    pop     di
+    pop     si
+    popf
+    clc
+    retf
+
+.write_err:
+    mov     ax, 0x0408
+    pop     bp
+    pop     di
+    pop     si
+    popf
+    stc
+    retf
+
+; Shared data for INT 25h/26h
+abs_io_drive      db  0
+abs_io_count      dw  0
+abs_io_start      dw  0
+abs_io_buf_off    dw  0
+abs_io_buf_seg    dw  0
+abs_io_bios_drv   db  0
+abs_io_spt        dw  0
+abs_io_heads      dw  0
+
+; ---------------------------------------------------------------------------
+; abs_disk_setup - Set up drive geometry for absolute disk I/O
+; Input: cs:abs_io_drive = DOS drive number (0=A, 2=C)
+; Output: cs:abs_io_bios_drv, cs:abs_io_spt, cs:abs_io_heads set; CF=1 on error
+; ---------------------------------------------------------------------------
+abs_disk_setup:
+    mov     al, [cs:abs_io_drive]
+    cmp     al, 2
+    jae     .setup_hd
+    mov     byte [cs:abs_io_bios_drv], al
+    mov     word [cs:abs_io_spt], 18
+    mov     word [cs:abs_io_heads], 2
+    clc
+    ret
+.setup_hd:
+    mov     byte [cs:abs_io_bios_drv], 0x80
+    mov     word [cs:abs_io_spt], 63
+    mov     word [cs:abs_io_heads], 16
+    clc
+    ret
+
+; ---------------------------------------------------------------------------
+; abs_lba_to_chs - Convert LBA to CHS for absolute disk I/O
+; Input: AX = LBA sector; Output: CH=cyl, CL=sector, DH=head
+; ---------------------------------------------------------------------------
+abs_lba_to_chs:
+    xor     dx, dx
+    div     word [cs:abs_io_spt]
+    inc     dl
+    mov     cl, dl
+    xor     dx, dx
+    div     word [cs:abs_io_heads]
+    mov     ch, al
+    mov     dh, dl
+    ret
 
 ; ---------------------------------------------------------------------------
 ; INT 00h handler - Divide Error (always prints for debugging)

@@ -139,9 +139,16 @@ int21_01:
     call    check_stdin_redirected
     jc      .redir_input
 
-    ; Device: Wait for keypress via BIOS INT 16h
+    ; Device: Wait for keypress via BIOS INT 16h (call DOS idle while waiting)
+.wait_01:
+    mov     ah, 0x01
+    int     0x16
+    jnz     .got_key_01
+    int     0x28                ; DOS idle - let TSRs run
+    jmp     .wait_01
+.got_key_01:
     xor     ah, ah
-    int     0x16                ; AH=scancode, AL=ASCII
+    int     0x16                ; Consume the key
     ; Echo to screen
     push    ax
     mov     ah, 0x0E
@@ -300,6 +307,13 @@ int21_07:
     call    check_stdin_redirected
     jc      .redir
 
+.wait_07:
+    mov     ah, 0x01
+    int     0x16
+    jnz     .got_key_07
+    int     0x28                ; DOS idle
+    jmp     .wait_07
+.got_key_07:
     xor     ah, ah
     int     0x16
     mov     byte [save_ax], al
@@ -322,6 +336,13 @@ int21_08:
     call    check_stdin_redirected
     jc      .redir
 
+.wait_08:
+    mov     ah, 0x01
+    int     0x16
+    jnz     .got_key_08
+    int     0x28                ; DOS idle
+    jmp     .wait_08
+.got_key_08:
     xor     ah, ah
     int     0x16
     cmp     al, 0x03            ; Ctrl+C?
@@ -447,7 +468,13 @@ int21_0A:
     mov     ch, [es:di]         ; CH = max characters
 
 .input_loop:
-    ; Get a keystroke via BIOS
+    ; Wait for a keystroke via BIOS (call DOS idle while waiting)
+    mov     ah, 0x01
+    int     0x16
+    jnz     .got_key_0A
+    int     0x28                ; DOS idle - let TSRs run
+    jmp     .input_loop
+.got_key_0A:
     xor     ah, ah
     int     0x16
     ; AL = ASCII code (0 if extended key), AH = scan code
