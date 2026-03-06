@@ -117,7 +117,7 @@ $(FLOPPY): $(VBR_BIN) $(STAGE2_BIN) $(IOSYS_BIN) $(COMMAND_BIN) $(UTIL_BINS) $(T
 			ARGS="$$ARGS $$f:$$NAME"; \
 		fi; \
 	done; \
-	@# Frogger data files excluded to save space \
+	# Frogger data files excluded to save space \
 	echo "$(MKFLOPPY) $$ARGS"; \
 	$(MKFLOPPY) $$ARGS
 

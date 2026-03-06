@@ -123,7 +123,7 @@ fi
 
 # Collect files from APP_DIR
 echo "Scanning ${APP_DIR}..."
-MKFLOPPY_ARGS="--hd ${HD_IMG}"
+MKFLOPPY_ARGS=(--hd "$HD_IMG")
 FILE_COUNT=0
 SKIP_COUNT=0
 
@@ -163,7 +163,7 @@ while IFS= read -r -d '' filepath; do
         continue
     fi
 
-    MKFLOPPY_ARGS="${MKFLOPPY_ARGS} ${filepath}:${dosname}"
+    MKFLOPPY_ARGS+=("${filepath}:${dosname}")
     FILE_COUNT=$((FILE_COUNT + 1))
 done < <(find "$APP_DIR" -type f -print0 | sort -z)
 
@@ -176,8 +176,9 @@ fi
 
 # Build HD image
 echo "Building HD image: ${HD_IMG}"
-echo "$MKFLOPPY" $MKFLOPPY_ARGS
-$MKFLOPPY $MKFLOPPY_ARGS
+printf '%q ' "$MKFLOPPY" "${MKFLOPPY_ARGS[@]}"
+printf '\n'
+"$MKFLOPPY" "${MKFLOPPY_ARGS[@]}"
 
 if [ "$NO_RUN" -eq 1 ]; then
     echo "HD image ready: ${HD_IMG}"

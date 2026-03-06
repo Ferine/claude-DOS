@@ -25,7 +25,7 @@ impl Fat16Image {
             // FAT16: first two entries are reserved
             // Entry 0: 0xFFF8 (media descriptor in low byte, 0xFF in high)
             // Entry 1: 0xFFFF (end of chain marker)
-            data[offset] = bpb.media_type;  // 0xF8
+            data[offset] = bpb.media_type; // 0xF8
             data[offset + 1] = 0xFF;
             data[offset + 2] = 0xFF;
             data[offset + 3] = 0xFF;
@@ -198,7 +198,10 @@ impl Fat16Image {
     fn get_fat16_entry(&self, cluster: u16) -> u16 {
         let fat_start = self.bpb.reserved_sectors as usize * self.bpb.bytes_per_sector as usize;
         let offset = cluster as usize * 2;
-        u16::from_le_bytes([self.data[fat_start + offset], self.data[fat_start + offset + 1]])
+        u16::from_le_bytes([
+            self.data[fat_start + offset],
+            self.data[fat_start + offset + 1],
+        ])
     }
 
     /// Add a directory entry to the root directory
@@ -206,7 +209,13 @@ impl Fat16Image {
         self.add_root_dir_entry_with_attr(name, start_cluster, file_size, 0x20);
     }
 
-    fn add_root_dir_entry_with_attr(&mut self, name: &[u8; 11], start_cluster: u16, file_size: u32, attr: u8) {
+    fn add_root_dir_entry_with_attr(
+        &mut self,
+        name: &[u8; 11],
+        start_cluster: u16,
+        file_size: u32,
+        attr: u8,
+    ) {
         let root_start =
             self.bpb.root_dir_start_sector() as usize * self.bpb.bytes_per_sector as usize;
         let max_entries = self.bpb.root_entry_count as usize;
@@ -222,11 +231,24 @@ impl Fat16Image {
     }
 
     /// Add a directory entry to a subdirectory
-    fn add_subdir_entry(&mut self, dir_cluster: u16, name: &[u8; 11], start_cluster: u16, file_size: u32) {
+    fn add_subdir_entry(
+        &mut self,
+        dir_cluster: u16,
+        name: &[u8; 11],
+        start_cluster: u16,
+        file_size: u32,
+    ) {
         self.add_subdir_entry_with_attr(dir_cluster, name, start_cluster, file_size, 0x20);
     }
 
-    fn add_subdir_entry_with_attr(&mut self, dir_cluster: u16, name: &[u8; 11], start_cluster: u16, file_size: u32, attr: u8) {
+    fn add_subdir_entry_with_attr(
+        &mut self,
+        dir_cluster: u16,
+        name: &[u8; 11],
+        start_cluster: u16,
+        file_size: u32,
+        attr: u8,
+    ) {
         let bytes_per_cluster =
             self.bpb.sectors_per_cluster as usize * self.bpb.bytes_per_sector as usize;
         let max_entries_per_cluster = bytes_per_cluster / 32;
@@ -261,7 +283,14 @@ impl Fat16Image {
     }
 
     /// Write a 32-byte directory entry at the given byte offset
-    fn write_dir_entry(&mut self, offset: usize, name: &[u8; 11], start_cluster: u16, file_size: u32, attr: u8) {
+    fn write_dir_entry(
+        &mut self,
+        offset: usize,
+        name: &[u8; 11],
+        start_cluster: u16,
+        file_size: u32,
+        attr: u8,
+    ) {
         self.data[offset..offset + 11].copy_from_slice(name);
         self.data[offset + 11] = attr;
         let cluster_bytes = start_cluster.to_le_bytes();

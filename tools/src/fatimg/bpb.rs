@@ -67,7 +67,8 @@ impl BiosParameterBlock {
     }
 
     pub fn total_data_clusters(&self) -> u16 {
-        ((self.total_sectors() - self.data_start_sector() as u32) / self.sectors_per_cluster as u32) as u16
+        ((self.total_sectors() - self.data_start_sector() as u32) / self.sectors_per_cluster as u32)
+            as u16
     }
 
     /// 32MB hard disk BPB (FAT16, 65536 sectors, 8 sectors/cluster = 4KB)
@@ -83,16 +84,16 @@ impl BiosParameterBlock {
             reserved_sectors: 1,
             num_fats: 2,
             root_entry_count: 512,
-            total_sectors_16: 0,        // Use 32-bit field
-            media_type: 0xF8,           // Hard disk
+            total_sectors_16: 0, // Use 32-bit field
+            media_type: 0xF8,    // Hard disk
             fat_size_16: 32,
             sectors_per_track: 63,
             num_heads: 16,
             hidden_sectors: 0,
             total_sectors_32: 65536,
-            drive_number: 0x80,         // First hard disk
+            drive_number: 0x80, // First hard disk
             boot_signature: 0x29,
-            volume_id: 0x434C4448,      // "CLDH"
+            volume_id: 0x434C4448, // "CLDH"
             volume_label: *b"CLAUDEDOS C",
             fs_type: *b"FAT16   ",
         }

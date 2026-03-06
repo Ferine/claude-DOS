@@ -22,6 +22,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 FLOPPY_IMG="$PROJECT_DIR/images/floppy.img"
 RESULTS_DIR="$PROJECT_DIR/test_results"
 SOCKET="/tmp/qemu-test-$$.sock"
+RUN_FLOPPY_IMG="$FLOPPY_IMG"
 
 # Test configuration
 BOOT_TIMEOUT=5        # Seconds to wait for boot
@@ -87,6 +88,11 @@ capture_screen() {
     fi
 }
 
+screenshot_captured() {
+    local name="$1"
+    [ -f "$RESULTS_DIR/${name}.png" ] || [ -f "$RESULTS_DIR/${name}.ppm" ]
+}
+
 # Start QEMU
 start_qemu() {
     local rw_mode="${1:-ro}"  # ro or rw
@@ -94,18 +100,26 @@ start_qemu() {
     rm -f "$SOCKET"
     mkdir -p "$RESULTS_DIR"
 
-    local format_opt=""
     if [ "$rw_mode" = "rw" ]; then
-        format_opt=",format=raw"
+        RUN_FLOPPY_IMG="$RESULTS_DIR/floppy-rw.img"
+        cp "$FLOPPY_IMG" "$RUN_FLOPPY_IMG"
+        qemu-system-i386 \
+            -drive file="$RUN_FLOPPY_IMG",if=floppy,format=raw \
+            -boot a \
+            -m 4 \
+            -display cocoa \
+            -monitor unix:$SOCKET,server,nowait \
+            2>/dev/null &
+    else
+        RUN_FLOPPY_IMG="$FLOPPY_IMG"
+        qemu-system-i386 \
+            -fda "$RUN_FLOPPY_IMG" \
+            -boot a \
+            -m 4 \
+            -display cocoa \
+            -monitor unix:$SOCKET,server,nowait \
+            2>/dev/null &
     fi
-
-    qemu-system-i386 \
-        -fda "$FLOPPY_IMG$format_opt" \
-        -boot a \
-        -m 4 \
-        -display cocoa \
-        -monitor unix:$SOCKET,server,nowait \
-        2>/dev/null &
     QEMU_PID=$!
 
     sleep $BOOT_TIMEOUT
@@ -128,6 +142,10 @@ stop_qemu() {
     fi
 
     rm -f "$SOCKET"
+    if [ "$RUN_FLOPPY_IMG" != "$FLOPPY_IMG" ]; then
+        rm -f "$RUN_FLOPPY_IMG"
+    fi
+    RUN_FLOPPY_IMG="$FLOPPY_IMG"
 }
 
 # Run commands via monitor
@@ -220,7 +238,13 @@ test_file_ops() {
 
     stop_qemu
 
-    log_info "File ops test: Screenshots captured"
+    if screenshot_captured "file_ops" && screenshot_captured "file_ops_dir"; then
+        log_info "File ops test: Screenshots captured"
+        return 0
+    else
+        log_error "File ops test: FAILED"
+        return 1
+    fi
 }
 
 test_find_files() {
@@ -236,7 +260,13 @@ test_find_files() {
 
     stop_qemu
 
-    log_info "FindFirst test: Screenshot captured"
+    if screenshot_captured "find_files"; then
+        log_info "FindFirst test: Screenshot captured"
+        return 0
+    else
+        log_error "FindFirst test: FAILED"
+        return 1
+    fi
 }
 
 test_dpmi() {

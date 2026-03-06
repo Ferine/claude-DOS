@@ -44,8 +44,12 @@ fn main() {
 fn run_floppy_mode(args: &[&String]) {
     if args.len() < 3 {
         eprintln!("Usage: mkfloppy <output.img> <vbr.bin> [file1:DOSNAME file2:DOSNAME ...]");
-        eprintln!("  DOSNAME can be a simple filename (STAGE2.BIN) or include a path (DATOS/FILE.FLI)");
-        eprintln!("  Example: mkfloppy floppy.img vbr.bin stage2.bin:STAGE2.BIN data.fli:DATOS/DATA.FLI");
+        eprintln!(
+            "  DOSNAME can be a simple filename (STAGE2.BIN) or include a path (DATOS/FILE.FLI)"
+        );
+        eprintln!(
+            "  Example: mkfloppy floppy.img vbr.bin stage2.bin:STAGE2.BIN data.fli:DATOS/DATA.FLI"
+        );
         std::process::exit(1);
     }
 
@@ -84,7 +88,10 @@ fn run_floppy_mode(args: &[&String]) {
             let c = img.add_file_with_path(dos_path, &fat_name, &contents);
             eprintln!(
                 "Added {} as {} (cluster {}, {} bytes)",
-                file_path, dos_path, c, contents.len()
+                file_path,
+                dos_path,
+                c,
+                contents.len()
             );
             c
         } else {
@@ -92,7 +99,10 @@ fn run_floppy_mode(args: &[&String]) {
             let c = img.add_file(&fat_name, &contents);
             eprintln!(
                 "Added {} as {} (cluster {}, {} bytes)",
-                file_path, dos_path, c, contents.len()
+                file_path,
+                dos_path,
+                c,
+                contents.len()
             );
             c
         };
@@ -149,7 +159,10 @@ fn run_hd_mode(args: &[&String]) {
         };
         eprintln!(
             "Added {} as {} (cluster {}, {} bytes)",
-            file_path, dos_path, c, contents.len()
+            file_path,
+            dos_path,
+            c,
+            contents.len()
         );
     }
 

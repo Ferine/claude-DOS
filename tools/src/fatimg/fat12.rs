@@ -91,8 +91,8 @@ impl Fat12Image {
 
     /// Convert cluster number to byte offset in image
     fn cluster_to_offset(&self, cluster: u16) -> usize {
-        let sector = self.bpb.data_start_sector() as usize + (cluster as usize - 2)
-            * self.bpb.sectors_per_cluster as usize;
+        let sector = self.bpb.data_start_sector() as usize
+            + (cluster as usize - 2) * self.bpb.sectors_per_cluster as usize;
         sector * self.bpb.bytes_per_sector as usize
     }
 
@@ -135,25 +135,15 @@ impl Fat12Image {
         file_size: u32,
         attr: u8,
     ) {
-        let root_start = self.bpb.root_dir_start_sector() as usize
-            * self.bpb.bytes_per_sector as usize;
+        let root_start =
+            self.bpb.root_dir_start_sector() as usize * self.bpb.bytes_per_sector as usize;
         let max_entries = self.bpb.root_entry_count as usize;
 
         // Find first free entry
         for i in 0..max_entries {
             let offset = root_start + i * 32;
             if self.data[offset] == 0x00 || self.data[offset] == 0xE5 {
-                // Write directory entry
-                self.data[offset..offset + 11].copy_from_slice(name);
-                self.data[offset + 11] = attr;
-                // Bytes 12-25: timestamps etc. (leave as zero for simplicity)
-                // Starting cluster at offset 26-27
-                let cluster_bytes = start_cluster.to_le_bytes();
-                self.data[offset + 26] = cluster_bytes[0];
-                self.data[offset + 27] = cluster_bytes[1];
-                // File size at offset 28-31
-                let size_bytes = file_size.to_le_bytes();
-                self.data[offset + 28..offset + 32].copy_from_slice(&size_bytes);
+                self.write_dir_entry(offset, name, start_cluster, file_size, attr);
                 return;
             }
         }
@@ -162,11 +152,12 @@ impl Fat12Image {
 
     /// Create a subdirectory in the root directory.
     /// Returns the starting cluster of the new directory.
-    pub fn create_directory(&mut self, name_8_3: &[u8; 11]) -> u16 {
+    pub fn create_directory(&mut self, name_8_3: &[u8; 11], parent_cluster: u16) -> u16 {
         let name_str = String::from_utf8_lossy(name_8_3).trim().to_string();
+        let dir_key = Self::directory_key(parent_cluster, &name_str);
 
         // Check if already created
-        if let Some(&cluster) = self.directories.get(&name_str) {
+        if let Some(&cluster) = self.directories.get(&dir_key) {
             return cluster;
         }
 
@@ -199,13 +190,18 @@ impl Fat12Image {
         let dotdot_name: [u8; 11] = *b"..         ";
         self.data[dir_offset + 32..dir_offset + 43].copy_from_slice(&dotdot_name);
         self.data[dir_offset + 32 + 11] = 0x10; // Directory attribute
-        // Parent cluster = 0 (root), already zeroed
+        let parent_bytes = parent_cluster.to_le_bytes();
+        self.data[dir_offset + 32 + 26] = parent_bytes[0];
+        self.data[dir_offset + 32 + 27] = parent_bytes[1];
 
-        // Add directory entry to root
-        self.add_root_dir_entry_with_attr(name_8_3, dir_cluster, 0, 0x10);
+        if parent_cluster == 0 {
+            self.add_root_dir_entry_with_attr(name_8_3, dir_cluster, 0, 0x10);
+        } else {
+            self.add_subdir_entry_with_attr(parent_cluster, name_8_3, dir_cluster, 0, 0x10);
+        }
 
         // Remember this directory
-        self.directories.insert(name_str, dir_cluster);
+        self.directories.insert(dir_key, dir_cluster);
 
         dir_cluster
     }
@@ -263,6 +259,17 @@ impl Fat12Image {
         start_cluster: u16,
         file_size: u32,
     ) {
+        self.add_subdir_entry_with_attr(dir_cluster, name, start_cluster, file_size, 0x20);
+    }
+
+    fn add_subdir_entry_with_attr(
+        &mut self,
+        dir_cluster: u16,
+        name: &[u8; 11],
+        start_cluster: u16,
+        file_size: u32,
+        attr: u8,
+    ) {
         let bytes_per_cluster =
             self.bpb.sectors_per_cluster as usize * self.bpb.bytes_per_sector as usize;
         let max_entries_per_cluster = bytes_per_cluster / 32;
@@ -276,16 +283,7 @@ impl Fat12Image {
             for i in 0..max_entries_per_cluster {
                 let offset = dir_offset + i * 32;
                 if self.data[offset] == 0x00 || self.data[offset] == 0xE5 {
-                    // Write directory entry
-                    self.data[offset..offset + 11].copy_from_slice(name);
-                    self.data[offset + 11] = 0x20; // Archive attribute
-                    // Starting cluster at offset 26-27
-                    let cluster_bytes = start_cluster.to_le_bytes();
-                    self.data[offset + 26] = cluster_bytes[0];
-                    self.data[offset + 27] = cluster_bytes[1];
-                    // File size at offset 28-31
-                    let size_bytes = file_size.to_le_bytes();
-                    self.data[offset + 28..offset + 32].copy_from_slice(&size_bytes);
+                    self.write_dir_entry(offset, name, start_cluster, file_size, attr);
                     return;
                 }
             }
@@ -312,6 +310,23 @@ impl Fat12Image {
                 current_cluster = next_cluster;
             }
         }
+    }
+
+    fn write_dir_entry(
+        &mut self,
+        offset: usize,
+        name: &[u8; 11],
+        start_cluster: u16,
+        file_size: u32,
+        attr: u8,
+    ) {
+        self.data[offset..offset + 11].copy_from_slice(name);
+        self.data[offset + 11] = attr;
+        let cluster_bytes = start_cluster.to_le_bytes();
+        self.data[offset + 26] = cluster_bytes[0];
+        self.data[offset + 27] = cluster_bytes[1];
+        let size_bytes = file_size.to_le_bytes();
+        self.data[offset + 28..offset + 32].copy_from_slice(&size_bytes);
     }
 
     /// Get a FAT12 entry value
@@ -352,14 +367,15 @@ impl Fat12Image {
 
             // Convert to 8.3 name
             let dir_name = to_fat_name_internal(part);
+            let dir_key =
+                Self::directory_key(current_cluster, String::from_utf8_lossy(&dir_name).trim());
 
             // Check if directory already exists
-            let name_str = String::from_utf8_lossy(&dir_name).trim().to_string();
-            if let Some(&cluster) = self.directories.get(&name_str) {
+            if let Some(&cluster) = self.directories.get(&dir_key) {
                 current_cluster = cluster;
             } else {
                 // Create the directory
-                current_cluster = self.create_directory(&dir_name);
+                current_cluster = self.create_directory(&dir_name, current_cluster);
             }
         }
 
@@ -373,13 +389,29 @@ impl Fat12Image {
 
     /// Get the cluster for a directory path, or None if it doesn't exist
     pub fn get_directory_cluster(&self, path: &str) -> Option<u16> {
-        let normalized = path.to_uppercase().trim().to_string();
-        self.directories.get(&normalized).copied()
+        let mut current_cluster = 0u16;
+        for part in path.split('/') {
+            let normalized = part.trim().to_uppercase();
+            if normalized.is_empty() {
+                continue;
+            }
+            let key = Self::directory_key(current_cluster, &normalized);
+            current_cluster = self.directories.get(&key).copied()?;
+        }
+        Some(current_cluster)
     }
 
     /// Get the raw image data
     pub fn as_bytes(&self) -> &[u8] {
         &self.data
+    }
+
+    fn directory_key(parent_cluster: u16, name: &str) -> String {
+        if parent_cluster == 0 {
+            name.to_string()
+        } else {
+            format!("{}:{}", parent_cluster, name)
+        }
     }
 }
 
@@ -403,4 +435,102 @@ fn to_fat_name_internal(name: &str) -> [u8; 11] {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_names_in_root(img: &Fat12Image) -> Vec<[u8; 11]> {
+        let root_start =
+            img.bpb.root_dir_start_sector() as usize * img.bpb.bytes_per_sector as usize;
+        let max_entries = img.bpb.root_entry_count as usize;
+        let mut names = Vec::new();
+
+        for i in 0..max_entries {
+            let offset = root_start + i * 32;
+            let first_byte = img.data[offset];
+            if first_byte == 0x00 {
+                break;
+            }
+            if first_byte == 0xE5 {
+                continue;
+            }
+            let mut name = [0u8; 11];
+            name.copy_from_slice(&img.data[offset..offset + 11]);
+            names.push(name);
+        }
+
+        names
+    }
+
+    fn entry_names_in_subdir(img: &Fat12Image, cluster: u16) -> Vec<[u8; 11]> {
+        let dir_offset = img.cluster_to_offset(cluster);
+        let bytes_per_cluster =
+            img.bpb.sectors_per_cluster as usize * img.bpb.bytes_per_sector as usize;
+        let max_entries = bytes_per_cluster / 32;
+        let mut names = Vec::new();
+
+        for i in 0..max_entries {
+            let offset = dir_offset + i * 32;
+            let first_byte = img.data[offset];
+            if first_byte == 0x00 {
+                break;
+            }
+            if first_byte == 0xE5 {
+                continue;
+            }
+            let mut name = [0u8; 11];
+            name.copy_from_slice(&img.data[offset..offset + 11]);
+            names.push(name);
+        }
+
+        names
+    }
+
+    #[test]
+    fn nested_directory_is_attached_to_parent() {
+        let mut img = Fat12Image::new();
+        let file_name = to_fat_name_internal("FILE.TXT");
+
+        img.add_file_with_path("FOO/BAR/FILE.TXT", &file_name, b"test");
+
+        let foo_cluster = img.get_directory_cluster("FOO").expect("FOO directory");
+        let bar_cluster = img
+            .get_directory_cluster("FOO/BAR")
+            .expect("FOO/BAR directory");
+
+        let root_names = entry_names_in_root(&img);
+        assert!(root_names.contains(&to_fat_name_internal("FOO")));
+        assert!(!root_names.contains(&to_fat_name_internal("BAR")));
+
+        let foo_names = entry_names_in_subdir(&img, foo_cluster);
+        assert!(foo_names.contains(&to_fat_name_internal("BAR")));
+
+        let bar_offset = img.cluster_to_offset(bar_cluster);
+        let parent = u16::from_le_bytes([
+            img.data[bar_offset + 32 + 26],
+            img.data[bar_offset + 32 + 27],
+        ]);
+        assert_eq!(parent, foo_cluster);
+    }
+
+    #[test]
+    fn same_directory_name_under_different_parents_does_not_collide() {
+        let mut img = Fat12Image::new();
+        let one = to_fat_name_internal("ONE.TXT");
+        let two = to_fat_name_internal("TWO.TXT");
+
+        img.add_file_with_path("A/COMMON/ONE.TXT", &one, b"one");
+        img.add_file_with_path("B/COMMON/TWO.TXT", &two, b"two");
+
+        let a_common = img
+            .get_directory_cluster("A/COMMON")
+            .expect("A/COMMON directory");
+        let b_common = img
+            .get_directory_cluster("B/COMMON")
+            .expect("B/COMMON directory");
+
+        assert_ne!(a_common, b_common);
+    }
 }
